@@ -1,0 +1,39 @@
+name: forced_config cross-platform
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  forced-config:
+    name: forced_config (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Rust format check
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+
+      - name: Compile webcodex-runner
+        run: cargo check --locked -p webcodex-runner
+
+      - name: forced_config tests
+        run: cargo test --locked -p webcodex-runner forced_config
