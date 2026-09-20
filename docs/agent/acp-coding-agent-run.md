@@ -27,10 +27,13 @@ an ACP JSON-RPC tunnel.
 
 The Runner owns an `[acp]` / `[[acp.agents]]` startup configuration. Each agent
 entry supplies a logical id/name, executable, argv, explicit `env_from_env`
-mappings, and an operator ceiling for run-level ACP config option ids. There is
-no production `codex-acp` default. The provider child is always spawned after
-`env_clear()` and receives only configured mappings. Missing source variables
-fail before provider process start.
+mappings, an operator ceiling for run-level ACP config option ids, and optional
+Runner-local `forced_config` values. Forced config is administrator policy: it
+is never caller authority, cannot be overridden remotely, and must be verified
+against the live ACP session before prompt dispatch. There is no production
+`codex-acp` default. The provider child is always spawned after `env_clear()` and
+receives only configured mappings. Missing source variables fail before
+provider process start.
 
 P1 exposes exactly three model tools: `coding_agent_start`,
 `coding_agent_observe`, and `coding_agent_cancel`. They require the independent
@@ -92,6 +95,7 @@ WebCodex owns:
 
 - exact Runner and registered Project routing;
 - provider identity and stale-provider fencing;
+- Runner-local forced ACP config policy and pre-prompt verification;
 - run admission and idempotent initiation;
 - bounded lifecycle, timeout, cancellation, and process-tree cleanup;
 - sanitized structured observation;
@@ -103,7 +107,7 @@ The ACP agent owns:
 - coding reasoning and planning;
 - its own shell/edit/tool decisions;
 - its own sandbox and approval behavior;
-- account, organization, model, and provider policy;
+- account, organization, available model/config option set, and provider policy;
 - provider-specific coding behavior.
 
 WebCodex must not turn ACP into a second implementation of WebCodex file, shell,
@@ -444,6 +448,7 @@ concrete need rather than pretending P1 already has per-value policy.
 
 - executable or argv;
 - arbitrary environment or secret/API-key material;
+- Runner `forced_config` policy or values;
 - arbitrary cwd;
 - transport selection;
 - raw ACP JSON-RPC method/params/id;
@@ -475,6 +480,35 @@ args = []
 # Explicit operator mappings only. Values never go to the Server.
 HTTPS_PROXY = "HTTPS_PROXY"
 ```
+
+Operators may also enforce live ACP config values locally:
+
+```toml
+[[acp.agents]]
+id = "codex"
+name = "Codex"
+executable = "/runner/owned/path/to/codex-acp"
+args = []
+allowed_config_options = ["mode", "collaboration_mode", "fast-mode"]
+
+[acp.agents.forced_config]
+model = "gpt-5.6-luna"
+reasoning_effort = "max"
+```
+
+`forced_config` is Runner-owned administrator policy. A key cannot also appear
+in `allowed_config_options`. Remote `coding_agent_start` input may repeat the
+exact forced value, but a conflicting value fails before `session/prompt`.
+Forced values currently support the ACP stable-v1 string/select and boolean
+forms; integer values are rejected at Runner config validation.
+
+After `session/new`, the Runner validates each forced key/value against the
+provider's live advertised config options, explicitly applies each forced value,
+applies separately allowed caller overrides, then re-asserts any drifted value and
+verifies every forced value immediately before the prompt-dispatch path. Missing
+options, unsupported values, failed `session/set_config_option` calls, or values
+not reflected by the provider fail closed with `execution_state=not_started`;
+WebCodex does not fall back to another model or reasoning setting.
 
 The exact executable example is operator-specific; WebCodex must not prescribe
 `npx -y` as a production default or download packages at request time.

@@ -116,3 +116,25 @@ allow_cwd_anywhere = false
 # allowed_roots = ["/root/git"]
 max_timeout_secs = 3600
 max_output_bytes = 262144
+
+# Optional ACP coding-agent providers. The whole [acp] section is
+# startup/restart-owned; changes require a Runner restart.
+# [acp]
+# max_concurrent_runs = 1
+#
+# [[acp.agents]]
+# id = "codex"
+# name = "Codex"
+# executable = "/absolute/path/to/codex-acp"
+# args = []
+# # Remote callers may change only these live provider options.
+# allowed_config_options = ["mode", "collaboration_mode", "fast-mode"]
+#
+# # Runner-local administrator policy. These values are validated against the
+# # provider's live advertised options and re-verified before session/prompt.
+# # A conflicting remote value fails closed; there is no fallback.
+# # The values below are examples and must actually be advertised by your ACP
+# # provider/session or the CodingAgentRun will fail before prompt dispatch.
+# [acp.agents.forced_config]
+# model = "gpt-5.6-luna"
+# reasoning_effort = "max"

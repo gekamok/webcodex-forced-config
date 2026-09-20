@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
+use webcodex_core::coding_agent::CodingAgentConfigValue;
 
 const DEFAULT_SYSTEM_CONFIG_DIR: &str = "/etc/webcodex";
 pub(crate) const CLIENT_PROFILE_ERROR: &str =
@@ -160,6 +161,10 @@ pub(crate) struct AcpAgentConfig {
     /// explicitly named here. The live advertised option still validates value.
     #[serde(default)]
     pub(crate) allowed_config_options: Vec<String>,
+    /// Runner-local operator policy. These live ACP config options must be active
+    /// before prompt dispatch and remote callers cannot override them.
+    #[serde(default)]
+    pub(crate) forced_config: BTreeMap<String, CodingAgentConfigValue>,
 }
 
 fn default_acp_max_concurrent_runs() -> usize {
@@ -1777,7 +1782,8 @@ fn validate_acp_env_name(value: &str) -> Result<(), ()> {
 fn validate_acp_config(config: &AcpConfig) -> Result<(), String> {
     use std::collections::HashSet;
     use webcodex_core::coding_agent::{
-        validate_provider_id, CODING_AGENT_MAX_CONFIG_KEY_BYTES, CODING_AGENT_MAX_PROVIDERS,
+        validate_provider_id, CODING_AGENT_MAX_CONFIG_KEY_BYTES, CODING_AGENT_MAX_CONFIG_OPTIONS,
+        CODING_AGENT_MAX_CONFIG_VALUE_BYTES, CODING_AGENT_MAX_PROVIDERS,
         CODING_AGENT_MAX_PROVIDER_NAME_BYTES,
     };
 
@@ -1889,6 +1895,36 @@ fn validate_acp_config(config: &AcpConfig) -> Result<(), String> {
             {
                 return Err(format!(
                     "ACP agent '{}' contains an invalid or duplicate allowed config option",
+                    agent.id
+                ));
+            }
+        }
+        if agent.forced_config.len() > CODING_AGENT_MAX_CONFIG_OPTIONS {
+            return Err(format!(
+                "ACP agent '{}' forced_config may contain at most {CODING_AGENT_MAX_CONFIG_OPTIONS} entries",
+                agent.id
+            ));
+        }
+        for (option, value) in &agent.forced_config {
+            if option.is_empty()
+                || option.len() > CODING_AGENT_MAX_CONFIG_KEY_BYTES
+                || option.chars().any(char::is_control)
+                || value.serialized_len() > CODING_AGENT_MAX_CONFIG_VALUE_BYTES
+            {
+                return Err(format!(
+                    "ACP agent '{}' contains an invalid forced config option",
+                    agent.id
+                ));
+            }
+            if matches!(value, CodingAgentConfigValue::Integer(_)) {
+                return Err(format!(
+                    "ACP agent '{}' forced_config supports only string and boolean values",
+                    agent.id
+                ));
+            }
+            if config_ids.contains(option.as_str()) {
+                return Err(format!(
+                    "ACP agent '{}' config options cannot be both allowed and forced",
                     agent.id
                 ));
             }
@@ -2113,6 +2149,7 @@ mod acp_config_tests {
             args: Vec::new(),
             env_from_env: BTreeMap::new(),
             allowed_config_options: Vec::new(),
+            forced_config: BTreeMap::new(),
         }
     }
 
@@ -2145,6 +2182,72 @@ mod acp_config_tests {
                 .unwrap_err()
                 .contains("WebCodex-sensitive"));
         }
+    }
+
+    #[test]
+    fn acp_forced_config_rejects_allowed_overlap() {
+        let mut configured = agent();
+        configured.allowed_config_options.push("model".to_string());
+        configured.forced_config.insert(
+            "model".to_string(),
+            CodingAgentConfigValue::String("gpt-5.6-luna".to_string()),
+        );
+        assert!(validate(configured)
+            .unwrap_err()
+            .contains("cannot be both allowed and forced"));
+    }
+
+    #[test]
+    fn acp_forced_config_rejects_integer_values() {
+        let mut configured = agent();
+        configured
+            .forced_config
+            .insert("turns".to_string(), CodingAgentConfigValue::Integer(3));
+        assert!(validate(configured)
+            .unwrap_err()
+            .contains("supports only string and boolean values"));
+    }
+
+    #[test]
+    fn acp_forced_config_accepts_string_and_boolean_values() {
+        let mut configured = agent();
+        configured.forced_config.insert(
+            "model".to_string(),
+            CodingAgentConfigValue::String("gpt-5.6-luna".to_string()),
+        );
+        configured
+            .forced_config
+            .insert("fast-mode".to_string(), CodingAgentConfigValue::Bool(false));
+        validate(configured).unwrap();
+    }
+
+    #[test]
+    fn acp_forced_config_deserializes_from_runner_toml_shape() {
+        let executable = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let parsed: AcpConfig = toml::from_str(&format!(
+            r#"
+max_concurrent_runs = 2
+
+[[agents]]
+id = "codex"
+name = "Codex"
+executable = {executable:?}
+allowed_config_options = ["mode"]
+
+[agents.forced_config]
+model = "gpt-5.6-luna"
+reasoning_effort = "max"
+"#
+        ))
+        .unwrap();
+        assert_eq!(
+            parsed.agents[0].forced_config.get("model"),
+            Some(&CodingAgentConfigValue::String("gpt-5.6-luna".to_string()))
+        );
+        validate_acp_config(&parsed).unwrap();
     }
 }
 
