@@ -12,10 +12,11 @@ import type {
 } from "../models/topology";
 
 import type { McpProviderRequest, TunnelProfileAction, TunnelProfileRequest } from "../models/connections-tools";
-import type { CodingAgentRequest, SshRegisterRequest, SshResourcesSnapshot, SshMutationResult, RunnerCapabilityAuthorizationSnapshot } from "../models/runner-capabilities";
+import type { CodingAgentGlobalsRequest, CodingAgentRequest, SshRegisterRequest, SshResourcesSnapshot, SshMutationResult, RunnerCapabilityAuthorizationSnapshot } from "../models/runner-capabilities";
 
 export const desktopApi = {
   saveCodingAgent: (request: CodingAgentRequest) => invoke<DesktopState>("save_coding_agent", { request }),
+  saveCodingAgentGlobals: (request: CodingAgentGlobalsRequest) => invoke<DesktopState>("save_coding_agent_globals", { request }),
   removeCodingAgent: (target: SettingsTarget, providerId: string, expectedRevision: number) =>
     invoke<DesktopState>("remove_coding_agent", { request: { target, provider_id: providerId, expected_revision: expectedRevision } }),
   sshResources: () => invoke<SshResourcesSnapshot>("ssh_resource_list"),

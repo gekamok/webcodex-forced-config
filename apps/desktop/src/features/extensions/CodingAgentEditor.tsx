@@ -25,16 +25,7 @@ export function CodingAgentEditor({ profile, revision, target, globals, onState,
   const [args, setArgs] = useState(JSON.stringify(profile?.args ?? []));
   const [enabled, setEnabled] = useState(profile?.enabled ?? true);
   const [options, setOptions] = useState(JSON.stringify(profile?.allowed_config_options ?? []));
-  const [forcedModel, setForcedModel] = useState(
-    typeof profile?.forced_config?.model === "string" ? profile.forced_config.model : profile ? "" : "gpt-6-luna",
-  );
-  const [forcedEffort, setForcedEffort] = useState(
-    typeof profile?.forced_config?.reasoning_effort === "string" ? profile.forced_config.reasoning_effort : profile ? "" : "max",
-  );
   const [mapping, setMapping] = useState<Mapping[]>(() => Object.entries(profile?.env_from_env ?? {}).map(([child, runner], row) => ({ row, child, runner })));
-  const [manageGlobals, setManageGlobals] = useState(globals !== null);
-  const [concurrency, setConcurrency] = useState(globals?.max_concurrent_runs ?? 1);
-  const [timeout, setTimeout] = useState(globals?.permission_timeout_secs ?? 5);
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const submitting = useRef(false); const nextRow = useRef(mapping.length);
   const updateMapping = (row: number, patch: Partial<Mapping>) => setMapping(fields => fields.map(field => field.row === row ? { ...field, ...patch } : field));
@@ -43,15 +34,6 @@ export function CodingAgentEditor({ profile, revision, target, globals, onState,
     let request: CodingAgentRequest;
     try {
       const parsedArgs = stringArray(args, 4096); const allowed = stringArray(options, 128);
-      const forced: Record<string, string | boolean> = { ...(profile?.forced_config ?? {}) };
-      delete forced.model;
-      delete forced.reasoning_effort;
-      if (forcedModel.trim()) forced.model = forcedModel.trim();
-      if (forcedEffort) forced.reasoning_effort = forcedEffort;
-      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(id.trim())
-        || new Set(allowed).size !== allowed.length
-        || allowed.some(value => !value.trim())
-        || Object.keys(forced).some(value => allowed.includes(value))) throw new Error("invalid_fields");
       const seen = new Set<string>();
       const env = mapping.map(field => {
         const child = field.child.trim(); const runner = field.runner.trim();
@@ -64,8 +46,8 @@ export function CodingAgentEditor({ profile, revision, target, globals, onState,
         return [child, runner];
       });
       request = { target, expected_revision: revision, previous_id: profile?.provider_id ?? null,
-        profile: { provider_id: id.trim(), name: name.trim(), executable: executable.trim(), args: parsedArgs, enabled, env_from_env: Object.fromEntries(env), allowed_config_options: allowed, forced_config: forced },
-        global_settings: manageGlobals ? { max_concurrent_runs: concurrency, permission_timeout_secs: timeout } : null };
+        profile: { provider_id: id.trim(), name: name.trim(), executable: executable.trim(), args: parsedArgs, enabled, env_from_env: Object.fromEntries(env), allowed_config_options: allowed, forced_config: profile?.forced_config ?? {} },
+        global_settings: globals };
     } catch { setError("invalid_fields"); return; }
     submitting.current = true; setBusy(true); setError(null);
     try { onState(await desktopApi.saveCodingAgent(request)); onClose(); }
@@ -94,11 +76,6 @@ export function CodingAgentEditor({ profile, revision, target, globals, onState,
           <button type="button" className="secondary-button" aria-label="Add Environment Mapping" disabled={mapping.length >= 64} onClick={() => { const row = nextRow.current++; setMapping(fields => [...fields, { row, child: "", runner: "" }]); }}>{r("addMapping")}</button>
         </fieldset>
         <div className="field-group"><label htmlFor="coding-agent-options">{r("allowedOptions")}</label><textarea id="coding-agent-options" value={options} onChange={event => setOptions(event.target.value)} rows={2} maxLength={16384} required disabled={busy} spellCheck={false} /></div>
-        <div className="field-group"><label htmlFor="coding-agent-forced-model">{r("forcedModel")}</label><input id="coding-agent-forced-model" aria-label="Forced model" value={forcedModel} onChange={event => setForcedModel(event.target.value)} maxLength={128} disabled={busy} spellCheck={false} placeholder="gpt-6-luna" /></div>
-        <div className="field-group"><label htmlFor="coding-agent-forced-effort">{r("forcedReasoning")}</label><select id="coding-agent-forced-effort" aria-label="Forced reasoning effort" value={forcedEffort} onChange={event => setForcedEffort(event.target.value)} disabled={busy}><option value="">—</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><small>{r("forcedHelp")}</small></div>
-        <label className="profile-checkbox" htmlFor="coding-global-settings"><input id="coding-global-settings" type="checkbox" checked={manageGlobals} onChange={event => setManageGlobals(event.target.checked)} disabled={busy} />{r("globalSettings")}</label>
-        <p>{r("preserveGlobals")}</p>
-        {manageGlobals && <div className="mcp-environment-row"><div className="field-group"><label htmlFor="coding-concurrency">{r("maxConcurrent")}</label><input id="coding-concurrency" type="number" min={1} max={8} value={concurrency} onChange={event => setConcurrency(event.target.valueAsNumber)} required disabled={busy} /></div><div className="field-group"><label htmlFor="coding-timeout">{r("permissionTimeout")}</label><input id="coding-timeout" type="number" min={1} max={60} value={timeout} onChange={event => setTimeout(event.target.valueAsNumber)} required disabled={busy} /></div></div>}
       </details>
       {error && <p role="alert" className="workspace-notice">{error === "coding_agent_ownership_conflict" ? r("ownershipConflict") : error === "invalid_fields" ? c("invalidFields") : c("operationFailed")}</p>}
       <div className="connection-actions"><button className="primary-button" type="submit" aria-label="Save" disabled={busy}>{p("save")}</button><button className="secondary-button" type="button" disabled={busy} onClick={onClose}>{p("cancel")}</button></div>

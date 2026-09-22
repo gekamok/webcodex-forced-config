@@ -72,6 +72,7 @@ pub fn run() {
             commands::save_mcp_provider,
             commands::remove_mcp_provider,
             commands::save_coding_agent,
+            commands::save_coding_agent_globals,
             commands::remove_coding_agent,
             commands::ssh_resource_list,
             commands::ssh_resource_register,

@@ -37,6 +37,31 @@ pub struct CodingAgentProfile {
 pub struct AcpGlobalSettings {
     pub max_concurrent_runs: usize,
     pub permission_timeout_secs: u64,
+    #[serde(default = "default_global_forced_config")]
+    pub forced_config: BTreeMap<String, CodingAgentConfigValue>,
+}
+
+fn default_global_forced_config() -> BTreeMap<String, CodingAgentConfigValue> {
+    BTreeMap::from([
+        (
+            "model".to_string(),
+            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
+        ),
+        (
+            "reasoning_effort".to_string(),
+            CodingAgentConfigValue::String("max".to_string()),
+        ),
+    ])
+}
+
+impl Default for AcpGlobalSettings {
+    fn default() -> Self {
+        Self {
+            max_concurrent_runs: 1,
+            permission_timeout_secs: 5,
+            forced_config: default_global_forced_config(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -103,6 +128,14 @@ pub struct CodingAgentRemove {
     pub target: crate::webcodex::settings::SettingsTarget,
     pub expected_revision: u64,
     pub provider_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodingAgentGlobalsUpdate {
+    pub target: crate::webcodex::settings::SettingsTarget,
+    pub expected_revision: u64,
+    pub global_settings: AcpGlobalSettings,
 }
 
 #[derive(Clone)]
@@ -221,6 +254,21 @@ impl CodingAgentStore {
         Ok(())
     }
 
+    pub fn stage_global_settings(
+        &mut self,
+        settings: AcpGlobalSettings,
+        revision: u64,
+    ) -> DesktopResult<()> {
+        self.check_revision(revision)?;
+        validate_global_settings(&settings)?;
+        let mut next = self.manifest.clone();
+        next.global_settings = Some(settings);
+        next.revision = next.revision.checked_add(1).ok_or_else(invalid)?;
+        validate_manifest(&next)?;
+        self.manifest = next;
+        Ok(())
+    }
+
     pub fn stage_remove(&mut self, id: &str, revision: u64) -> DesktopResult<()> {
         self.check_revision(revision)?;
         let index = self
@@ -284,6 +332,34 @@ fn read_optional(path: &Path) -> DesktopResult<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+fn validate_desktop_forced_config(
+    forced: &BTreeMap<String, CodingAgentConfigValue>,
+) -> DesktopResult<()> {
+    if forced.len() > CODING_AGENT_MAX_CONFIG_OPTIONS {
+        return Err(invalid());
+    }
+    for (key, value) in forced {
+        if key.is_empty()
+            || key.len() > CODING_AGENT_MAX_CONFIG_KEY_BYTES
+            || key.chars().any(char::is_control)
+            || value.serialized_len() > CODING_AGENT_MAX_CONFIG_VALUE_BYTES
+            || matches!(value, CodingAgentConfigValue::Integer(_))
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+fn validate_global_settings(settings: &AcpGlobalSettings) -> DesktopResult<()> {
+    if !(1..=8).contains(&settings.max_concurrent_runs)
+        || !(1..=60).contains(&settings.permission_timeout_secs)
+    {
+        return Err(invalid());
+    }
+    validate_desktop_forced_config(&settings.forced_config)
+}
+
 fn validate_profile(profile: &CodingAgentProfile) -> DesktopResult<()> {
     if validate_provider_id(&profile.provider_id).is_err()
         || profile.name.trim().is_empty()
@@ -337,16 +413,13 @@ fn validate_profile(profile: &CodingAgentProfile) -> DesktopResult<()> {
             return Err(invalid());
         }
     }
-    for (key, value) in &profile.forced_config {
-        if key.is_empty()
-            || key.len() > CODING_AGENT_MAX_CONFIG_KEY_BYTES
-            || key.chars().any(char::is_control)
-            || value.serialized_len() > CODING_AGENT_MAX_CONFIG_VALUE_BYTES
-            || matches!(value, CodingAgentConfigValue::Integer(_))
-            || options.contains(key)
-        {
-            return Err(invalid());
-        }
+    validate_desktop_forced_config(&profile.forced_config)?;
+    if profile
+        .forced_config
+        .keys()
+        .any(|key| options.contains(key))
+    {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -365,11 +438,7 @@ fn validate_manifest(manifest: &Manifest) -> DesktopResult<()> {
         return Err(invalid());
     }
     if let Some(settings) = &manifest.global_settings {
-        if !(1..=8).contains(&settings.max_concurrent_runs)
-            || !(1..=60).contains(&settings.permission_timeout_secs)
-        {
-            return Err(invalid());
-        }
+        validate_global_settings(settings)?;
     }
     let mut ids = BTreeSet::new();
     for profile in &manifest.profiles {

@@ -14,7 +14,11 @@ export interface CodingAgentProfile extends CodingAgentProvider {
   allowed_config_options: string[];
   forced_config: Record<string, string | boolean>;
 }
-export interface AcpGlobalSettings { max_concurrent_runs: number; permission_timeout_secs: number }
+export interface AcpGlobalSettings {
+  max_concurrent_runs: number;
+  permission_timeout_secs: number;
+  forced_config: Record<string, string | boolean>;
+}
 export interface CodingAgentsSnapshot {
   revision: number;
   profiles: CodingAgentProfile[];
@@ -32,6 +36,11 @@ export interface CodingAgentRequest {
   previous_id: string | null;
   profile: CodingAgentProfile;
   global_settings: AcpGlobalSettings | null;
+}
+export interface CodingAgentGlobalsRequest {
+  target: SettingsTarget;
+  expected_revision: number;
+  global_settings: AcpGlobalSettings;
 }
 export interface SshResource {
   name: string;

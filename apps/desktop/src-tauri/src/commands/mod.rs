@@ -56,6 +56,15 @@ pub async fn save_coding_agent(
 }
 
 #[tauri::command]
+pub async fn save_coding_agent_globals(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: crate::coding_agents::CodingAgentGlobalsUpdate,
+) -> DesktopResult<DesktopStateSnapshot> {
+    project_state_result(&app, state.save_coding_agent_globals(request).await)
+}
+
+#[tauri::command]
 pub async fn remove_coding_agent(
     app: AppHandle,
     state: State<'_, AppState>,

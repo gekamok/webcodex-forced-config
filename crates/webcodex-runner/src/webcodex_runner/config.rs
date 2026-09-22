@@ -141,6 +141,9 @@ pub(crate) struct AcpConfig {
     pub(crate) max_concurrent_runs: usize,
     #[serde(default = "default_acp_permission_timeout_secs")]
     pub(crate) permission_timeout_secs: u64,
+    /// Runner-wide ACP policy applied to every coding-agent session.
+    #[serde(default = "default_acp_forced_config")]
+    pub(crate) forced_config: BTreeMap<String, CodingAgentConfigValue>,
     #[serde(default)]
     pub(crate) agents: Vec<AcpAgentConfig>,
 }
@@ -173,11 +176,25 @@ fn default_acp_permission_timeout_secs() -> u64 {
     DEFAULT_ACP_PERMISSION_TIMEOUT_SECS
 }
 
+fn default_acp_forced_config() -> BTreeMap<String, CodingAgentConfigValue> {
+    BTreeMap::from([
+        (
+            "model".to_string(),
+            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
+        ),
+        (
+            "reasoning_effort".to_string(),
+            CodingAgentConfigValue::String("max".to_string()),
+        ),
+    ])
+}
+
 impl Default for AcpConfig {
     fn default() -> Self {
         Self {
             max_concurrent_runs: default_acp_max_concurrent_runs(),
             permission_timeout_secs: default_acp_permission_timeout_secs(),
+            forced_config: default_acp_forced_config(),
             agents: Vec::new(),
         }
     }
@@ -1781,11 +1798,39 @@ fn validate_acp_env_name(value: &str) -> Result<(), ()> {
     Ok(())
 }
 
+fn validate_forced_config_map(
+    label: &str,
+    forced: &BTreeMap<String, CodingAgentConfigValue>,
+) -> Result<(), String> {
+    use webcodex_core::coding_agent::{
+        CODING_AGENT_MAX_CONFIG_KEY_BYTES, CODING_AGENT_MAX_CONFIG_OPTIONS,
+        CODING_AGENT_MAX_CONFIG_VALUE_BYTES,
+    };
+
+    if forced.len() > CODING_AGENT_MAX_CONFIG_OPTIONS {
+        return Err(format!(
+            "{label} may contain at most {CODING_AGENT_MAX_CONFIG_OPTIONS} entries"
+        ));
+    }
+    for (option, value) in forced {
+        if option.is_empty()
+            || option.len() > CODING_AGENT_MAX_CONFIG_KEY_BYTES
+            || option.chars().any(char::is_control)
+            || value.serialized_len() > CODING_AGENT_MAX_CONFIG_VALUE_BYTES
+        {
+            return Err(format!("{label} contains an invalid forced config option"));
+        }
+        if matches!(value, CodingAgentConfigValue::Integer(_)) {
+            return Err(format!("{label} supports only string and boolean values"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_acp_config(config: &AcpConfig) -> Result<(), String> {
     use std::collections::HashSet;
     use webcodex_core::coding_agent::{
-        validate_provider_id, CODING_AGENT_MAX_CONFIG_KEY_BYTES, CODING_AGENT_MAX_CONFIG_OPTIONS,
-        CODING_AGENT_MAX_CONFIG_VALUE_BYTES, CODING_AGENT_MAX_PROVIDERS,
+        validate_provider_id, CODING_AGENT_MAX_CONFIG_KEY_BYTES, CODING_AGENT_MAX_PROVIDERS,
         CODING_AGENT_MAX_PROVIDER_NAME_BYTES,
     };
 
@@ -1806,6 +1851,7 @@ fn validate_acp_config(config: &AcpConfig) -> Result<(), String> {
             "acp.agents may contain at most {CODING_AGENT_MAX_PROVIDERS} entries"
         ));
     }
+    validate_forced_config_map("acp.forced_config", &config.forced_config)?;
     let mut ids = HashSet::new();
     for agent in &config.agents {
         validate_provider_id(&agent.id)
@@ -1901,32 +1947,22 @@ fn validate_acp_config(config: &AcpConfig) -> Result<(), String> {
                 ));
             }
         }
-        if agent.forced_config.len() > CODING_AGENT_MAX_CONFIG_OPTIONS {
-            return Err(format!(
-                "ACP agent '{}' forced_config may contain at most {CODING_AGENT_MAX_CONFIG_OPTIONS} entries",
-                agent.id
-            ));
-        }
-        for (option, value) in &agent.forced_config {
-            if option.is_empty()
-                || option.len() > CODING_AGENT_MAX_CONFIG_KEY_BYTES
-                || option.chars().any(char::is_control)
-                || value.serialized_len() > CODING_AGENT_MAX_CONFIG_VALUE_BYTES
-            {
-                return Err(format!(
-                    "ACP agent '{}' contains an invalid forced config option",
-                    agent.id
-                ));
-            }
-            if matches!(value, CodingAgentConfigValue::Integer(_)) {
-                return Err(format!(
-                    "ACP agent '{}' forced_config supports only string and boolean values",
-                    agent.id
-                ));
-            }
+        validate_forced_config_map(
+            &format!("ACP agent '{}' forced_config", agent.id),
+            &agent.forced_config,
+        )?;
+        for option in agent.forced_config.keys() {
             if config_ids.contains(option.as_str()) {
                 return Err(format!(
                     "ACP agent '{}' config options cannot be both allowed and forced",
+                    agent.id
+                ));
+            }
+        }
+        for option in config.forced_config.keys() {
+            if config_ids.contains(option.as_str()) {
+                return Err(format!(
+                    "ACP agent '{}' config options cannot be allowed when forced globally",
                     agent.id
                 ));
             }
@@ -2210,6 +2246,30 @@ OPENAI_API_KEY = "SUB2API_API_KEY"
                 .unwrap_err()
                 .contains("WebCodex-sensitive"));
         }
+    }
+
+    #[test]
+    fn acp_global_forced_config_defaults_to_luna_max() {
+        let config = AcpConfig::default();
+        assert_eq!(
+            config.forced_config.get("model"),
+            Some(&CodingAgentConfigValue::String("gpt-6-luna".to_string()))
+        );
+        assert_eq!(
+            config.forced_config.get("reasoning_effort"),
+            Some(&CodingAgentConfigValue::String("max".to_string()))
+        );
+    }
+
+    #[test]
+    fn acp_global_forced_config_rejects_allowed_overlap() {
+        let mut config = AcpConfig::default();
+        let mut configured = agent();
+        configured.allowed_config_options.push("model".to_string());
+        config.agents.push(configured);
+        assert!(validate_acp_config(&config)
+            .unwrap_err()
+            .contains("forced globally"));
     }
 
     #[test]

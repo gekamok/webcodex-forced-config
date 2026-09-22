@@ -50,6 +50,19 @@ pub(crate) fn request(id: &str, revision: u64) -> CodingAgentUpdate {
 }
 
 #[test]
+fn global_settings_default_to_gpt6_luna_max() {
+    let settings = AcpGlobalSettings::default();
+    assert_eq!(
+        settings.forced_config.get("model"),
+        Some(&CodingAgentConfigValue::String("gpt-6-luna".into()))
+    );
+    assert_eq!(
+        settings.forced_config.get("reasoning_effort"),
+        Some(&CodingAgentConfigValue::String("max".into()))
+    );
+}
+
+#[test]
 fn coding_agents_add_edit_remove_and_restart_keep_desired_state_and_tombstones() {
     let dir = Scratch::new();
     let mut store = CodingAgentStore::load(&dir.0);
@@ -168,6 +181,7 @@ fn coding_agents_capacity_and_advanced_settings_are_bounded() {
         update.global_settings = Some(AcpGlobalSettings {
             max_concurrent_runs: runs,
             permission_timeout_secs: timeout,
+            forced_config: default_global_forced_config(),
         });
         assert!(store.clone().stage_update(update).is_err());
     }

@@ -149,6 +149,19 @@ fn reconcile_document(doc: &mut DocumentMut, store: &CodingAgentStore) -> Deskto
             "permission_timeout_secs",
             (settings.permission_timeout_secs as i64).into(),
         );
+        let mut forced = InlineTable::new();
+        for (key, value) in &settings.forced_config {
+            match value {
+                CodingAgentConfigValue::String(value) => {
+                    forced.insert(key, Value::from(value.as_str()));
+                }
+                CodingAgentConfigValue::Bool(value) => {
+                    forced.insert(key, Value::from(*value));
+                }
+                CodingAgentConfigValue::Integer(_) => return Err(error()),
+            }
+        }
+        set(acp, "forced_config", forced.into());
     }
     Ok(())
 }

@@ -614,6 +614,14 @@ pub(crate) struct CodingAgentManager {
     initial_claim_writes: std::sync::atomic::AtomicUsize,
 }
 
+fn effective_provider_config(config: &AcpConfig, provider: &AcpAgentConfig) -> AcpAgentConfig {
+    let mut effective = provider.clone();
+    for (key, value) in &config.forced_config {
+        effective.forced_config.insert(key.clone(), value.clone());
+    }
+    effective
+}
+
 impl CodingAgentManager {
     pub(crate) fn new(
         config: &AcpConfig,
@@ -625,7 +633,7 @@ impl CodingAgentManager {
             providers.insert(
                 provider.id.clone(),
                 Arc::new(ProviderEntry {
-                    config: provider.clone(),
+                    config: effective_provider_config(config, provider),
                     instance_id: format!("acp_{}", Uuid::new_v4().simple()),
                 }),
             );
@@ -665,7 +673,7 @@ impl CodingAgentManager {
             providers.insert(
                 provider.id.clone(),
                 Arc::new(ProviderEntry {
-                    config: provider.clone(),
+                    config: effective_provider_config(config, provider),
                     instance_id: format!("acp_{}", Uuid::new_v4().simple()),
                 }),
             );
@@ -3105,6 +3113,7 @@ mod tests {
         AcpConfig {
             max_concurrent_runs: 1,
             permission_timeout_secs: 1,
+            forced_config: BTreeMap::new(),
             agents: vec![AcpAgentConfig {
                 id: "codex".to_string(),
                 name: "Codex".to_string(),
@@ -3453,7 +3462,7 @@ for line in sys.stdin:
 
     #[cfg(unix)]
     fn force_luna_max(cfg: &mut AcpConfig) {
-        cfg.agents[0].forced_config = BTreeMap::from([
+        cfg.forced_config = BTreeMap::from([
             (
                 "model".to_string(),
                 CodingAgentConfigValue::String("gpt-6-luna".to_string()),
@@ -4145,6 +4154,41 @@ for line in sys.stdin:
         assert!(!received_methods(&wire_log(&temp))
             .iter()
             .any(|method| method == "session/prompt"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn global_forced_config_overrides_provider_for_every_session() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_configs");
+        let mut cfg = fake_config(exe, args);
+        cfg.agents[0].forced_config.insert(
+            "model".to_string(),
+            CodingAgentConfigValue::String("default-model".to_string()),
+        );
+        force_luna_max(&mut cfg);
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_globalforced01";
+        assert!(manager
+            .handle(
+                start_request(&manager, &root, run, BTreeMap::new()),
+                &projects,
+            )
+            .error
+            .is_none());
+        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+        assert_eq!(terminal.state, CodingAgentRunState::Completed);
+        let provider = manager.providers.values().next().unwrap();
+        assert_eq!(
+            provider.config.forced_config.get("model"),
+            Some(&CodingAgentConfigValue::String("gpt-6-luna".to_string()))
+        );
+        assert_eq!(
+            provider.config.forced_config.get("reasoning_effort"),
+            Some(&CodingAgentConfigValue::String("max".to_string()))
+        );
     }
 
     #[test]
@@ -5923,6 +5967,7 @@ for line in sys.stdin:
         let cfg = AcpConfig {
             max_concurrent_runs: 1,
             permission_timeout_secs: 3,
+            forced_config: BTreeMap::new(),
             agents: vec![AcpAgentConfig {
                 id: "codex".to_string(),
                 name: "Codex ACP dogfood".to_string(),
@@ -6091,6 +6136,7 @@ for line in sys.stdin:
         let cfg = AcpConfig {
             max_concurrent_runs: manager.max_concurrent_runs,
             permission_timeout_secs: 1,
+            forced_config: BTreeMap::new(),
             agents: manager
                 .providers
                 .values()
