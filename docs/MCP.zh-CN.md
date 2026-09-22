@@ -37,6 +37,12 @@ UI 文案可能随 rollout 变化；URL 与认证以 CLI 输出为准。Develope
 和 write/modify action 是否可用，还分别受 ChatGPT 套餐、workspace 与管理员设置控制；
 WebCodex scope 不会扩大这些客户端侧权限。
 
+如果 ChatGPT 自身返回 `FORBIDDEN: This conversation does not support developer MCPs`
+（或提示当前会话已禁用 developer MCP server），在有相反证据之前应先按 Host/conversation
+admission 问题处理。如果 Host 根本没有 dispatch `runtime_status`，这段文本并不是
+WebCodex tool result。修改 credential 或 Runner 配置前，先从独立路径确认 Server/Runner；
+完整流程见[故障排查](TROUBLESHOOTING.zh-CN.md)。
+
 ## Claude 与其他 MCP client
 
 使用同一份输出的 `/mcp` URL 与认证值。Claude 中添加 custom connector 并粘贴 MCP URL；
@@ -54,10 +60,12 @@ share 的 Project Credential，并不是 PAT/OAuth/shared-key 的通用 query au
 Connection: Tunnel + No authentication；临时 WebCodex Bearer 留在本机，由固定且经过校验的
 OpenAI `tunnel-client` 注入。
 
-对于通过 OpenAI Secure Tunnel 访问的长期 **loopback-only** Server，operator 可以显式设置
+对于通过 OpenAI Secure Tunnel 访问的长期 **loopback-only** Server，可以设置
 `WEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT=true`，从而信任由本机 user API token
-认证的 ChatGPT host-file rewrite。该例外仅在 `WEBCODEX_ADDR` 解析为 loopback 且当前 credential
-是普通 user API token 时生效。默认关闭；network-accessible Server 不应使用它替代 OAuth。
+认证的 ChatGPT host-file rewrite。WebCodex Desktop 自 v0.4.2 起会为它自己管理的本机
+loopback Server 默认写入该值；已有显式配置不会被覆盖。该例外仅在 `WEBCODEX_ADDR` 解析为
+loopback 且当前 credential 是普通 user API token 时生效。独立/network-accessible Server
+仍默认关闭，不应使用它替代 OAuth。
 
 如果在 Windows 上使用普通独立 Server + Runner 并通过 OpenAI Tunnel 接入，或排查“本地 `/readyz` 正常但 ChatGPT Connector 创建失败”的情况，见 [Windows + OpenAI Secure MCP Tunnel 深入实操](WINDOWS_OPENAI_TUNNEL.zh-CN.md)。它是深入配置/排障文档，不是普通用户第一次必须阅读的教程。
 
@@ -83,7 +91,7 @@ OAuth 仍是独立的高级身份路径。
 
 ### Adaptive Runtime routing
 
-WebCodex 只有一个 model-facing MCP runtime contract：**Adaptive Runtime**。Canonical `ToolDefinition` rank 决定 direct tools；普通 model-visible long-tail tools 通过 `call_runtime_tool` 调用；server-owned protocol capability 与 MCP App admission 可以为对应请求加入 hidden extension。启动时不再选择 model surface。direct/gateway 只改变 presentation，不会绕过目标工具的 authentication、Project authority、permission、Runner capability、Session 或 safety checks。
+WebCodex 只有一个 model-facing MCP runtime contract：**Adaptive Runtime**。Canonical `ToolDefinition` rank 决定 direct tools；普通 model-visible long-tail tools 通过 `call_runtime_tool` 调用；server-owned protocol capability 与 MCP App admission 可以为对应请求加入 hidden extension。启动时不再选择 model surface。`tool_manifest(tool_name=...)` 只负责 discovery，不会动态向 Host 注册一个新 tool。exact manifest 的 `route.primary` 给出首选 callable；普通 direct tool 还会给出经 `call_runtime_tool` 的 `route.fallback`，用于 Host 当前没有该 direct callable 的情况；显式 MCP App presentation tool 会标明 Apps enabled 时该 fallback 被禁止。direct/gateway 只改变 presentation，不会绕过目标工具的 authentication、Project authority、permission、Runner capability、Session 或 safety checks。
 
 ### Tool result framing
 
@@ -201,12 +209,15 @@ Grok Custom MCP UI 与可用范围以 xAI 的
 work_on_project
 → read_files / search_project_texts / 按需语义导航
 → apply_text_edits 或其它 canonical edit 工具
+→ substantial work 进入真实状态后调用一次 present_work_result
 → 按需 run_process / run_shell / focused validation
 → show_changes
 → finish_coding_task
 ```
 
 `work_on_project` 在普通 registered Project 上启动或精确恢复 Workflow Session。用户要求隔离时，`work_on_project(mode=worktree)` 才让 Runner 创建 canonical managed worktree，并把该 worktree 注册为另一个普通 Project；没有隔离要求时，本地 `share` / `run` 直接使用 setup 已注册的那一个 Project。
+
+`present_work_result` 是 substantial coding 的一次性可视化层，不是 correctness primitive。挂载后，卡片通过 App-only state read 持续显示 Progress、Workspace、Validation 与 Review，无需模型轮询。`finish_coding_task` 在 non-blocking closeout 时把 eligible final changes seal 到 presentation cache，同一张卡随后发现这份 immutable snapshot，并按文件 lazy 展开 diff。tiny/read-only 工作应跳过这张卡，同一 Session 不应重复 presentation。
 
 Adaptive Runtime 可以把常用工具直接暴露，把 long-tail 工具通过 `call_runtime_tool` 暴露。direct/gateway 只影响 model exposure，不改变 schema validation、OAuth scope、Project authority、permission policy、Runner capability、Session fence 或 tool effects。
 

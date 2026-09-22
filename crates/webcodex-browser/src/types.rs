@@ -12,6 +12,9 @@ pub const MAX_IMAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_IMAGE_DIMENSION: u32 = 4096;
 pub const MAX_INPUT_TEXT_BYTES: usize = 4096;
 pub const MAX_URL_BYTES: usize = 8192;
+pub const MAX_CONSOLE_ENTRIES: usize = 200;
+pub const MAX_NETWORK_ENTRIES: usize = 300;
+pub const MAX_DIAGNOSTIC_TEXT_BYTES: usize = 2048;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -128,11 +131,41 @@ pub struct SemanticNode {
     pub actionable: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotMode {
+    #[default]
+    Auto,
+    Full,
+    Interactive,
+}
+
+impl SnapshotMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Full => "full",
+            Self::Interactive => "interactive",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserStability {
+    pub stable: bool,
+    pub waited_ms: u64,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SemanticSnapshot {
     pub browser_id: String,
     pub page_id: String,
     pub snapshot_generation: u64,
+    pub snapshot_mode: String,
+    pub auto_compacted: bool,
+    pub max_nodes: usize,
+    pub max_depth: u32,
     pub node_count: usize,
     pub truncated: bool,
     pub nodes: Vec<SemanticNode>,

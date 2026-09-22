@@ -492,7 +492,7 @@ args = []
 allowed_config_options = ["mode", "collaboration_mode", "fast-mode"]
 
 [acp.agents.forced_config]
-model = "gpt-5.6-luna"
+model = "gpt-6-luna"
 reasoning_effort = "max"
 ```
 

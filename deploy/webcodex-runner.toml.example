@@ -136,5 +136,5 @@ max_output_bytes = 262144
 # # The values below are examples and must actually be advertised by your ACP
 # # provider/session or the CodingAgentRun will fail before prompt dispatch.
 # [acp.agents.forced_config]
-# model = "gpt-5.6-luna"
+# model = "gpt-6-luna"
 # reasoning_effort = "max"

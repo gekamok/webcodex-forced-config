@@ -316,7 +316,7 @@ package 时默认将其设为 private；维护者
 | `transport` | 配置 `[quic]` 时优先用 `auto`。 |
 | `project_registry_dir` | 项目注册文件目录。 |
 | `[policy]` | 本地执行边界（`allowed_roots` 等）。 |
-| `[skills].roots` | 可选的 Runner 本机绝对 live Skill roots；WebCodex 不修改其中内容，受支持脚本可经 `run_skill_resource` 执行，也不会复制进 managed Skill Store。 |
+| `[skills].roots` | **自 v0.4.2 起可用。** 可选的 Runner 本机绝对 live Skill roots；WebCodex 不修改其中内容，受支持脚本可经 `run_skill_resource` 执行，也不会复制进 managed Skill Store。 |
 | `[instructions].files` | 可选 Runner 本机绝对 instruction 文件；应用于该 Runner 上每个 Project。无隐式默认路径；路径列表可 hot reload，文件内容本身 live。 |
 | `[shell]` | 可选 shell profile 定义与有界 persistent-shell 限制。 |
 | `[ssh.resources.<name>]` | 可选命名 SSH 目标，用于 Session 绑定的 `run_shell` / `run_job`。 |
@@ -427,6 +427,11 @@ MCP 与 GPT Actions 最终进入同一个 ToolRuntime authority path；GPT Actio
 
 详见 [GPT Actions](GPT_ACTIONS.zh-CN.md)、[MCP](MCP.zh-CN.md) 与
 [AI 接入指南](AI_ONBOARDING.zh-CN.md)。
+
+如果 ChatGPT 返回 conversation-level developer-MCP `FORBIDDEN`，不要直接把它当作
+Server 或 Runner 已离线的证据。先使用下面的 operator checks 独立验证部署，再按照
+[故障排查](TROUBLESHOOTING.zh-CN.md) 中的 Host 分层决策树判断；不要在 Runner 本来
+健康时仅因为该 Host error 就旋转 credential、重新注册 project 或反复重启 Runner。
 
 ## 运维
 

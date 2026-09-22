@@ -1,16 +1,19 @@
-import { ArrowUpRight, LoaderCircle, Search } from "lucide-react";
+import { ActionIcon, TextInput } from "@mantine/core";
+import { ArrowUpRight, Search } from "lucide-react";
+import { motion } from "motion/react";
 import { useMemo } from "react";
 import { relativeTime } from "../model/format.js";
 import type { WorkBucket, WorkItem } from "../model/work.js";
 import type { RuntimeLanguage } from "../../runtime_i18n.js";
 import { translate } from "../../runtime_i18n.js";
+import { WorkSurfaceSwitch, type WorkSurface } from "./GoalWorkbench.js";
 
 const BUCKET_ORDER: WorkBucket[] = ["running", "attention", "active", "recent"];
 export const BUCKET_LABEL: Record<WorkBucket, string> = {
-  running: "Running",
+  running: "Jobs running",
   attention: "Needs attention",
-  active: "Active",
-  recent: "Recent",
+  active: "Active Sessions",
+  recent: "Recent Sessions",
 };
 
 type Props = {
@@ -20,6 +23,8 @@ type Props = {
   locating: boolean;
   language: RuntimeLanguage;
   inventoryIncomplete: boolean;
+  surface: WorkSurface;
+  onSurfaceChange: (surface: WorkSurface) => void;
   onSearch: (value: string) => void;
   onLocateExact: () => void;
   onSelect: (item: WorkItem) => void;
@@ -32,6 +37,8 @@ export function WorkList({
   locating,
   language,
   inventoryIncomplete,
+  surface,
+  onSurfaceChange,
   onSearch,
   onLocateExact,
   onSelect,
@@ -57,24 +64,21 @@ export function WorkList({
     <aside className="work-list-panel">
       <div className="work-list-header">
         <div><span className="eyebrow">{t("Workspace")}</span><h1>{t("Work")}</h1></div>
+        <WorkSurfaceSwitch surface={surface} onSurfaceChange={onSurfaceChange} language={language} />
       </div>
-      <div className="work-search">
-        <Search size={15} />
-        <input
+      <TextInput className="work-search-field" type="search" leftSection={<Search size={15} />}
           aria-label={t("Search Sessions")}
           placeholder={t("Search work or paste a Session ID…")}
           value={search}
-          onChange={(event) => onSearch(event.target.value)}
+          onChange={(event) => onSearch(event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter") onLocateExact();
           }}
+          rightSection={/^wc_sess_/.test(search.trim()) ? <ActionIcon variant="light" size="sm"
+            aria-label={t("Locate exact Session")} onClick={onLocateExact} loading={locating}>
+            <ArrowUpRight size={14} />
+          </ActionIcon> : null}
         />
-        {/^wc_sess_/.test(search.trim()) && (
-          <button type="button" onClick={onLocateExact} disabled={locating}>
-            {locating ? <LoaderCircle size={14} /> : <ArrowUpRight size={14} />}
-          </button>
-        )}
-      </div>
       <div className="work-list-scroll">
         {inventoryIncomplete && (
           <div className="inventory-note">{t("Recent Session inventory is bounded. Paste an exact Session ID to locate omitted work.")}</div>
@@ -91,6 +95,7 @@ export function WorkList({
                   data-testid={"work-row-" + item.sessionId}
                   key={item.key}
                 >
+                  {selectedKey === item.key && <motion.span className="ui-selection-rail" layoutId="runtime-session-rail" aria-hidden="true" />}
                   <span className={"work-state-dot " + item.bucket} />
                   <span className="work-row-body">
                     <strong>{item.title}</strong>

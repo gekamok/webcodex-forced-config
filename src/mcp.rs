@@ -85,7 +85,7 @@ fn runtime(depot: &Depot) -> Option<Arc<ToolRuntime>> {
 // observation correlation, not client liveness evidence or authority. No other
 // arguments, Goal body, or Host binding are copied into the activity ledger.
 fn goal_plan_observation_id(tool_name: Option<&str>, params: &Value) -> Option<String> {
-    if tool_name != Some("goal_plan_state") {
+    if tool_name != Some("goal_plan_sync") {
         return None;
     }
     let id = params.pointer("/arguments/goal_id")?.as_str()?;
@@ -302,6 +302,27 @@ pub async fn mcp_info(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             "header": "Authorization: Bearer <shared_key_or_wc_pat>"
         }
     })));
+}
+
+fn mcp_tool_action_audit_ids(
+    success: bool,
+    observed_goal_plan_id: Option<&str>,
+    correlation: &crate::tool_runtime::ToolCallCorrelation,
+) -> Option<Value> {
+    if !success {
+        return None;
+    }
+    let mut ids = serde_json::Map::new();
+    if let Some(goal_id) = observed_goal_plan_id {
+        ids.insert("goal_id".to_string(), Value::String(goal_id.to_string()));
+    }
+    if let Some(session_id) = correlation.business_session_id.as_deref() {
+        ids.insert(
+            "business_session_id".to_string(),
+            Value::String(session_id.to_string()),
+        );
+    }
+    (!ids.is_empty()).then_some(Value::Object(ids))
 }
 
 #[handler]
@@ -534,10 +555,10 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
                         .is_meaningful(),
                 )
                 .recorder_gap(correlation.recorder_gap_session_id.clone());
-            if success {
-                if let Some(goal_id) = observed_goal_plan_id.as_deref() {
-                    event = event.ids(json!({"goal_id": goal_id}));
-                }
+            if let Some(ids) =
+                mcp_tool_action_audit_ids(success, observed_goal_plan_id.as_deref(), correlation)
+            {
+                event = event.ids(ids);
             }
             event.project = correlation
                 .resolved_project

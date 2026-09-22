@@ -4,9 +4,10 @@ import type { RuntimeLanguage } from "../../runtime_i18n.js";
 import { translate } from "../../runtime_i18n.js";
 import type { RuntimeV2Client } from "../api/client.js";
 import { SessionExecution } from "../components/SessionExecution.js";
+import { GoalWorkbench, type WorkSurface } from "../components/GoalWorkbench.js";
 import { SessionInspector } from "../components/SessionInspector.js";
 import { WorkList } from "../components/WorkList.js";
-import { selectedWorkFromDetail, type WorkItem } from "../model/work.js";
+import { selectedWorkFromDetail, workBucket, type WorkItem } from "../model/work.js";
 import type { ProjectRow } from "../model/types.js";
 import { useProjectGit } from "../state/useProjectGit.js";
 import { useSessionWorkspace, type SessionLocation } from "../state/useSessionWorkspace.js";
@@ -18,6 +19,10 @@ type Props = {
   projects: ProjectRow[];
   language: RuntimeLanguage;
   inventoryIncomplete: boolean;
+  surface?: WorkSurface;
+  onSurfaceChange?: (surface: WorkSurface) => void;
+  onOpenAgent?: (agentId: string) => void;
+  onOpenWindow?: (windowKey: string) => void;
   onOpenSession: (location: SessionLocation) => void;
   onLocateSession: (sessionId: string) => Promise<boolean>;
   onUnauthorized: () => void;
@@ -30,6 +35,10 @@ export function WorkView({
   projects,
   language,
   inventoryIncomplete,
+  surface = "sessions",
+  onSurfaceChange = () => {},
+  onOpenAgent = () => {},
+  onOpenWindow = () => {},
   onOpenSession,
   onLocateSession,
   onUnauthorized,
@@ -37,9 +46,25 @@ export function WorkView({
   const t = (value: string) => translate(value, language);
   const [search, setSearch] = useState("");
   const [locating, setLocating] = useState(false);
-  const session = useSessionWorkspace(client, Boolean(selected), selected, onUnauthorized);
+  const session = useSessionWorkspace(client, Boolean(selected && surface === "sessions"), selected, onUnauthorized);
   const project = selected ? projects.find((row) => row.id === selected.projectId) : undefined;
-  const git = useProjectGit(client, Boolean(selected), selected?.projectId || "");
+  const git = useProjectGit(client, Boolean(selected && surface === "sessions"), selected?.projectId || "");
+
+  if (surface === "goals") {
+    return (
+      <GoalWorkbench
+        client={client}
+        language={language}
+        projects={projects}
+        surface={surface}
+        onSurfaceChange={onSurfaceChange}
+        onOpenSession={onOpenSession}
+        onOpenAgent={onOpenAgent}
+        onOpenWindow={onOpenWindow}
+        onUnauthorized={onUnauthorized}
+      />
+    );
+  }
 
   const selectedBase = selected
     ? items.find((item) => item.sessionId === selected.sessionId && item.projectId === selected.projectId)
@@ -56,7 +81,7 @@ export function WorkView({
         lifecycle: session.detail?.lifecycle || "retained",
         mode: session.detail?.mode || "normal",
         updatedAt: session.detail?.updated_at || 0,
-        bucket: session.detail?.running_call || session.detail?.running_jobs ? "running" : "recent",
+        bucket: session.detail ? workBucket(session.detail) : "recent",
         phase: session.detail?.overview.reported_progress?.text || session.detail?.lifecycle || "Retained",
         runningCall: Boolean(session.detail?.running_call),
         runningJobs: session.detail?.running_jobs || 0,
@@ -106,13 +131,15 @@ export function WorkView({
         locating={locating}
         language={language}
         inventoryIncomplete={inventoryIncomplete}
+        surface={surface}
+        onSurfaceChange={onSurfaceChange}
         onSearch={setSearch}
         onLocateExact={() => void locateExact()}
         onSelect={open}
       />
 
       {sessionDenied ? (
-        <main className="session-main">
+        <main className="session-main ui-workbench-surface">
           <div className="empty-work">
             <CircleDot size={22} />
             <h2>{t("Session unavailable")}</h2>
@@ -122,7 +149,7 @@ export function WorkView({
       ) : selectedItem && selected ? (
         <SessionExecution item={selectedItem} location={selected} session={session} language={language} />
       ) : (
-        <main className="session-main">
+        <main className="session-main ui-workbench-surface">
           <div className="empty-work">
             <CircleDot size={22} />
             <h2>{t("Select a work Session")}</h2>

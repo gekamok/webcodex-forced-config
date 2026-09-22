@@ -1,4 +1,4 @@
-# Goal workflow and single-window continuity — G4
+# Goal workflow and single-window continuity — G4/G5/G6/G7
 
 This is the current WebCodex-owned Goal workflow contract, not repository
 `AGENTS.md` policy. Architecture is defined in
@@ -7,23 +7,47 @@ This is the current WebCodex-owned Goal workflow contract, not repository
 
 ## Ordinary single-window flow
 
-Use a new or existing durable Goal for substantial multi-step/cross-turn work.
-Create bounded completion conditions and stable plan steps, explicitly associate
-the current Workflow Session, and present the Goal Plan card. Tiny one-step
-lookups/trivial edits do not require setup. Use `checkpoint_goal` at recoverable
-milestones: exact Goal revision and idempotency key, atomic completed-step ids and
-optional current step, and a bounded recovery summary. Complete all steps and
-freshly verify/review before explicitly completing the Goal. Session closeout
-returns owned correlated active Goal follow-up; it does not complete the Goal.
+For ordinary **new** substantial multi-step/cross-turn work, first establish the
+exact Workflow Session with `work_on_project`, then call `prepare_goal_workflow` with
+that exact `session_id`, bounded completion conditions/stable plan steps, and an
+optional explicit controller Agent. The Store admits the new Goal and initial Session
+correlation atomically at revision 1. Then present the Goal Plan card. Tiny one-step
+lookups/trivial edits do not require setup. Exact known Goals can still use the
+lower-level `create_goal` / `associate_goal_workflow_session` primitives for explicit
+advanced composition; `prepare_goal_workflow` never guesses or reuses a Goal by title,
+Window, Session, or recency.
+
+For ordinary continuation of an exact existing Workflow Session, `work_on_project`
+also projects sparse `goal_context` when caller-owned active Goals are explicitly
+correlated to that Session. One returned Goal may be explicitly reused with
+`get_goal` / `present_goal_plan`; multiple returned Goals remain a bounded choice
+and are never auto-selected. No Goal is inferred from Project, Window, title, or
+recency, and the Session correlation grants no Goal authority. An unavailable
+projection is not evidence that the Session has no active Goal. This normal re-entry
+path prevents a new model turn from creating a duplicate Goal merely because it lost
+the earlier Goal identity.
+
+Use `checkpoint_goal` at recoverable milestones: exact Goal revision and idempotency
+key, atomic completed-step ids and optional current step, and a bounded recovery
+summary. Complete all steps and freshly verify/review before explicitly completing
+the Goal. Session closeout returns owned correlated active Goal follow-up; it does
+not complete the Goal.
 
 Automatic continuation is optional and requires an exact durable controller Agent.
-An Agent already made callable through explicit identity/Endpoint/presentation
-setup should be reused as that controller, with the same Agent Continuation card.
-The Agent may remain another Coordinator's Worker/Task assignee at the same time.
-Do not infer identity from Window co-location or create a second Goal-only Agent.
+An Agent already made callable through explicit identity/Endpoint/presentation setup
+should be reused as that controller. If its carrier is not ready, use the separate
+`agent_continuation_setup` flow. Endpoint rotation, App mount/bind, Host readiness,
+Goal Plan presentation and Wake creation are never part of `prepare_goal_workflow`
+success. The Agent may remain another Coordinator's Worker/Task assignee at the same
+time. Do not infer identity from Window co-location or create a second Goal-only Agent.
 
-The Goal Plan resource is solely `ui://webcodex/goal-plan/v3`, wire version 2. It
-renders step counts, current step, bounded milestones, last checkpoint and activity.
+The Goal Plan resource is solely `ui://webcodex/goal-plan/v6`, wire version 3. It
+renders step counts, current step, bounded milestones, last checkpoint, activity,
+and a bounded read-only continuity projection. Continuity keeps production Host
+carrier readiness and the exact current Goal-stall Wake lifecycle separate from
+bounded Host delivery and exact-consume fresh-turn proof. After newer meaningful work,
+the current epoch returns to ready/stalled with no current Wake while the most recent
+confirmed resume keeps its bounded Host outcome, fresh-turn proof, and timeline.
 Old pre-production Goal resource aliases are not supported. Agent Continuation
 remains a separate card and the only Host turn-dispatch carrier.
 
@@ -31,8 +55,12 @@ remains a separate card and the only Host turn-dispatch carrier.
 
 The Store tests cover plan bounds, fixed ids, one current step, atomic validation
 before mutation, revision competition, exact/changed keyed replay, reopen,
-malformed persisted plans and completion/terminal gates. Attention migration tests
-preserve existing Task-terminal facts and Wake identities in the one current schema.
+malformed persisted plans and completion/terminal gates. G6 additionally covers one
+transactional Goal + exact Session admission at revision 1, explicit/omitted owned
+controller, composition replay conflict, invalid Session identity, foreign controller
+existence hiding, and injected correlation/idempotency failures with complete rollback.
+Attention migration tests preserve existing Task-terminal facts and Wake identities in
+the one current schema.
 
 Runtime Goal tests use controlled timestamps rather than sleeping five minutes.
 They cover recent activity; continued live exact-Goal polling; one Event/Wake under
@@ -46,12 +74,12 @@ persistence; and Goal closeout privacy. They also exercise the same Agent as Wor
 and controller, the existing dispatch fence, accepted versus unknown delivery,
 exact consume, compact source-specific recovery messages, and no Task spawning.
 
-The Goal Plan JavaScript contract tests drive 10,000 same-epoch polls and verify
-that a committed attention result suppresses repeated detector requests. Server
-idempotency, not that local optimization, is the durable duplicate-prevention
-boundary. Detector calls carry only `goal_id`; no browser timestamp, Session,
-controller, Window selector or claimed coverage is trusted. There is no Goal Plan
-`ui/message` path. Terminal state stops both polling and detector follow-up.
+The Goal Plan JavaScript contract tests verify one exact `goal_plan_sync` App RPC,
+serial adaptive polling, hidden/visible cadence, teardown, and no conditional second
+RPC. Server idempotency remains the durable duplicate-prevention boundary. Sync
+calls carry only `goal_id`; no browser timestamp, Session, controller, Window
+selector or claimed coverage is trusted. There is no Goal Plan `ui/message` path.
+Terminal state stops polling.
 
 Representative focused commands:
 
@@ -80,9 +108,12 @@ authorized deployment and an actually bound Agent Continuation card.
 
 In that environment, explicitly set up/reuse the controller, correlate the current
 active Session, then keep the exact Goal Plan card observed while meaningful work
-is quiet. After 300,000 ms, a successful exact-Goal poll at most 15,000 ms old and
-at least 1,000 ms later than the last meaningful completion is only a candidate.
-The Server still checks current Goal/controller/Session/Project authority, latest
+is quiet. After 300,000 ms, a successful exact-Goal sync within the Server-owned
+75,000 ms observation lease and at least 1,000 ms later than the last meaningful
+completion is only a candidate. The App targets 12s while visibly stable, 5s near
+the boundary or during a Wake transition, and 60s while hidden/backgrounded; the
+lease covers that hidden cadence plus bounded Host scheduling slack. The Server
+still checks current Goal/controller/Session/Project authority, latest
 Window-to-Session relation, complete evidence and no active meaningful request.
 Closing or losing the card must not generate a new automatic turn. A different
 Goal's polling cannot keep this Goal's card alive.

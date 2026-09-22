@@ -37,7 +37,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
     match name {
         "work_on_project" => Some(work_on_project_output_schema()),
         "finish_coding_task" => Some(wrapped_output_schema(vec![
-            ("goal_follow_up", super::goals::goal_follow_up_schema()),
+            ("goal_follow_up", super::goals::active_goal_context_schema()),
             (
                 "summary_only",
                 schema_type("boolean", "True only for compact summary_only output."),
@@ -50,7 +50,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ("session_id", schema_type("string", "Full closeout explicit task session id; omitted from summary_only.")),
             (
                 "workspace_clean",
-                schema_type("boolean", "Compact summary_only workspace cleanliness verdict."),
+                nullable_schema("boolean", "Compact summary_only workspace cleanliness verdict; null means Git cleanliness is not applicable or was not observed."),
             ),
             (
                 "workspace_conflicts",
@@ -277,6 +277,7 @@ fn startup_brief_schema(detail: &str) -> Value {
             "continuation": startup_continuation_schema(detail),
             "semantic_navigation": startup_semantic_navigation_schema(),
             "extensions": startup_extensions_schema(),
+            "coding_agent_providers": super::coding_agents::provider_inventory_schema(),
             "repository": startup_repository_schema(),
             "blockers": startup_issue_list_schema(true),
             "warnings": startup_issue_list_schema(false),
@@ -467,7 +468,16 @@ fn startup_workspace_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "status": {"type": "string", "enum": ["clean", "dirty", "blocked", "unavailable"]},
+            "status": {"type": "string", "enum": ["available", "clean", "dirty", "blocked", "unavailable"]},
+            "git": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["clean", "dirty", "conflicted", "not_applicable", "unavailable"]},
+                    "reason_code": nullable_schema("string", "Stable Git-state reason such as non_git_project or git_unavailable.")
+                },
+                "required": ["status", "reason_code"],
+                "additionalProperties": false
+            },
             "git_available": nullable_schema("boolean", "Whether bounded Git inspection was available."),
             "branch": nullable_schema("string", "Current branch when observed."),
             "head": nullable_schema("string", "Current full HEAD commit when observed."),
@@ -481,6 +491,7 @@ fn startup_workspace_schema() -> Value {
         },
         "required": [
             "status",
+            "git",
             "git_available",
             "branch",
             "head",
@@ -537,11 +548,13 @@ fn startup_workflow_schema() -> Value {
                     "session_message_ack": {"type": "string", "maxLength": 720},
                     "session_message_resolution": {"type": "string", "maxLength": 480},
                     "context_sidecar": {"type": "string", "maxLength": 320},
+                    "control_sidecars": {"type": "string", "maxLength": 640},
                     "runner_targeting": {"type": "string", "maxLength": 320},
                     "persistent_shell": {"type": "string", "maxLength": 320},
                     "goal_workflow": {"type": "string", "maxLength": 720},
                     "goal_continuation": {"type": "string", "maxLength": 720},
                     "goal_checkpoint": {"type": "string", "maxLength": 480},
+                    "work_result_presentation": {"type": "string", "maxLength": 640},
                     "normal_closeout": {"type": "string", "maxLength": 480}
                 },
                 "required": [
@@ -550,11 +563,13 @@ fn startup_workflow_schema() -> Value {
                     "session_message_ack",
                     "session_message_resolution",
                     "context_sidecar",
+                    "control_sidecars",
                     "runner_targeting",
                     "persistent_shell",
                     "goal_workflow",
                     "goal_continuation",
                     "goal_checkpoint",
+                    "work_result_presentation",
                     "normal_closeout"
                 ],
                 "additionalProperties": false
@@ -1159,14 +1174,23 @@ fn work_on_project_output_schema() -> Value {
         "type": "object",
         "description": "Sparse workspace state. status is always present; null/default facts are omitted, branch/head are included when observed, git_available is emitted only when false, and conflicts only when non-zero.",
         "properties": {
-            "status": {"type": "string", "enum": ["clean", "dirty", "blocked", "unavailable"]},
+            "status": {"type": "string", "enum": ["available", "clean", "dirty", "blocked", "unavailable"]},
+            "git": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["clean", "dirty", "conflicted", "not_applicable", "unavailable"]},
+                    "reason_code": nullable_schema("string", "Stable Git-state reason such as non_git_project or git_unavailable.")
+                },
+                "required": ["status", "reason_code"],
+                "additionalProperties": false
+            },
             "git_available": nullable_schema("boolean", "Emitted when bounded Git inspection is explicitly unavailable; omission means no exceptional Git-unavailable fact."),
             "branch": nullable_schema("string", "Current branch when observed."),
             "head": nullable_schema("string", "Current full HEAD commit when observed."),
             "clean": nullable_schema("boolean", "Legacy compatibility field; normal clean/dirty state is represented by status and may omit this field."),
             "conflicts": {"type": "integer", "minimum": 1}
         },
-        "required": ["status"],
+        "required": ["status", "git"],
         "additionalProperties": true
     });
     let compact_instructions = json!({
@@ -1268,6 +1292,10 @@ fn work_on_project_output_schema() -> Value {
             schema_type("string", "created, continued, or resumed_explicitly."),
         ),
         (
+            "goal_context",
+            super::goals::active_goal_context_schema(),
+        ),
+        (
             "execution_context",
             session_execution_context_schema("Persistent execution defaults currently stored for this Workflow Session. Omitted when empty."),
         ),
@@ -1313,6 +1341,7 @@ fn work_on_project_output_schema() -> Value {
         ("instructions", compact_instructions),
         ("semantic_navigation", compact_semantic_navigation),
         ("extensions", startup_extensions_schema()),
+        ("coding_agent_providers", super::coding_agents::provider_inventory_schema()),
         ("jobs", compact_jobs),
         (
             "blockers",

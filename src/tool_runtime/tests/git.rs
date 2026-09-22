@@ -6179,6 +6179,22 @@ async fn show_changes_untracked_sensitive_path_preview_is_skipped() {
     );
 }
 
+#[tokio::test]
+async fn show_changes_untracked_public_dotenv_template_preview_is_visible() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git_repo(tmp.path());
+    fs::write(
+        tmp.path().join(".env.example"),
+        "PUBLIC_EXAMPLE_MARKER=fake\n",
+    )
+    .unwrap();
+
+    let output = show_changes_output_from_command(tmp.path(), true);
+    let preview = preview_for_path(&output, ".env.example");
+    assert_eq!(preview["kind"], "text");
+    assert_eq!(preview["lines"][0]["text"], "PUBLIC_EXAMPLE_MARKER=fake");
+}
+
 #[test]
 fn git_diff_hunks_command_is_read_only_and_scoped_to_paths() {
     let command = git_diff_hunks_command(&["src/lib.rs".to_string()], false).unwrap();
@@ -7909,12 +7925,12 @@ async fn show_changes_degrades_gracefully_for_non_git_project() {
     assert_reason_list_contains(
         &result.output["verdict"],
         "warning_reasons",
-        "git_unavailable",
+        "non_git_project",
     );
     let actions = result.output["suggested_next_actions"].as_array().unwrap();
     assert!(actions
         .iter()
-        .any(|a| a.as_str().unwrap().contains("unavailable")));
+        .any(|a| a.as_str().unwrap().contains("not applicable")));
     assert_eq!(result.output["status_observation"]["status"], "non_git");
     assert_eq!(
         result.output["head"],
@@ -8159,11 +8175,11 @@ fn non_git_show_changes_preserves_unobserved_state() {
     assert_eq!(output["clean"], Value::Null);
     assert_eq!(output["counts"]["conflicted"], Value::Null);
     assert_eq!(output["upstream_status"], "unobserved");
-    assert_eq!(output["upstream_reason_code"], "git_unavailable");
+    assert_eq!(output["upstream_reason_code"], "non_git_project");
     assert_eq!(output["upstream"], Value::Null);
     assert_eq!(output["ahead"], Value::Null);
     assert_eq!(output["behind"], Value::Null);
-    assert_reason_list_contains(&output["verdict"], "warning_reasons", "git_unavailable");
+    assert_reason_list_contains(&output["verdict"], "warning_reasons", "non_git_project");
 }
 
 #[test]

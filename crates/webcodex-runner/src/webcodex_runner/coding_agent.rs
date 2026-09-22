@@ -3151,7 +3151,7 @@ for line in sys.stdin:
   elif scenario in ('forced_configs','forced_not_applied','forced_reset_by_caller'):
    opts=[
     {'id':'mode','name':'Mode','type':'select','currentValue':config_values['mode'],'options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]},
-    {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'gpt-5.6-luna','name':'Luna'}]},
+    {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'gpt-6-luna','name':'Luna'}]},
     {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'max','name':'Max'}]}
    ]
   else:
@@ -3176,7 +3176,7 @@ for line in sys.stdin:
     config_values['model']='default-model'; config_values['reasoning_effort']='medium'
    opts=[
     {'id':'mode','name':'Mode','type':'select','currentValue':config_values['mode'],'options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]},
-    {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'gpt-5.6-luna','name':'Luna'}]},
+    {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'gpt-6-luna','name':'Luna'}]},
     {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'max','name':'Max'}]}
    ]
   else:
@@ -3456,7 +3456,7 @@ for line in sys.stdin:
         cfg.agents[0].forced_config = BTreeMap::from([
             (
                 "model".to_string(),
-                CodingAgentConfigValue::String("gpt-5.6-luna".to_string()),
+                CodingAgentConfigValue::String("gpt-6-luna".to_string()),
             ),
             (
                 "reasoning_effort".to_string(),
@@ -4192,7 +4192,7 @@ for line in sys.stdin:
         let mut cfg = fake_config(exe, args);
         cfg.agents[0].forced_config.insert(
             "model".to_string(),
-            CodingAgentConfigValue::String("gpt-5.6-luna".to_string()),
+            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
         );
         let projects = project_fixture(&temp);
         let root = temp.path().join("repo");
@@ -4235,7 +4235,7 @@ for line in sys.stdin:
         let mut cfg = fake_config(exe, args);
         cfg.agents[0].forced_config.insert(
             "model".to_string(),
-            CodingAgentConfigValue::String("gpt-5.6-luna".to_string()),
+            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
         );
         let projects = project_fixture(&temp);
         let root = temp.path().join("repo");
@@ -4317,7 +4317,7 @@ for line in sys.stdin:
         let mut cfg = fake_config(exe, args);
         cfg.agents[0].forced_config.insert(
             "model".to_string(),
-            CodingAgentConfigValue::String("gpt-5.6-luna".to_string()),
+            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
         );
         let projects = project_fixture(&temp);
         let root = temp.path().join("repo");
@@ -4331,7 +4331,7 @@ for line in sys.stdin:
                     same_run,
                     BTreeMap::from([(
                         "model".to_string(),
-                        CodingAgentConfigValue::String("gpt-5.6-luna".to_string()),
+                        CodingAgentConfigValue::String("gpt-6-luna".to_string()),
                     )]),
                 ),
                 &projects,
@@ -4353,7 +4353,7 @@ for line in sys.stdin:
         let mut cfg = fake_config(exe, args);
         cfg.agents[0].forced_config.insert(
             "model".to_string(),
-            CodingAgentConfigValue::String("gpt-5.6-luna".to_string()),
+            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
         );
         let projects = project_fixture(&temp);
         let root = temp.path().join("repo");

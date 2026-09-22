@@ -32,7 +32,7 @@ Start with the goal that matches what you are trying to do.
 
 ## I need help
 
-- [Troubleshooting](TROUBLESHOOTING.md) — installation, connection, runtime, and Runner problems
+- [Troubleshooting](TROUBLESHOOTING.md) — ChatGPT/MCP Host, installation, connection, runtime, and Runner problems
 - [Security](../SECURITY.md) — safe operating guidance and security model
 
 ## I want to understand or extend WebCodex
@@ -44,6 +44,8 @@ Start with the goal that matches what you are trying to do.
 - [Browser/CDP runtime architecture](architecture/browser-cdp-runtime.md) — first-class Browser domain, authority, lifecycle, stale fencing, and Phase 1 limits
 
 ## I want to contribute or release WebCodex
+
+- [Desktop development](DESKTOP_DEVELOPMENT.md) — run Desktop from source and build/test native Windows/macOS packages
 
 The `docs/agent/` pages below are maintainer/internal contracts. They intentionally
 contain protocol fields, compatibility names, and implementation invariants that

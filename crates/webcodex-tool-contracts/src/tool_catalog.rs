@@ -91,6 +91,7 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
     ToolDiscoveryGroup {
         name: TOOL_DISCOVERY_GROUP_GOAL,
         tools: &[
+            "prepare_goal_workflow",
             "create_goal",
             "get_goal",
             "present_goal_plan",
@@ -354,12 +355,11 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     },
     ToolRecommendedFlow {
         name: "single_window_goal_workflow",
-        summary: "Substantial work: establish/reuse Goal + plan, explicitly link current Workflow Session, checkpoint milestones, validate/review and explicitly complete. Optional auto-resume reuses the same callable Agent and its separate continuation card.",
-        manifest_purpose: "WebCodex-owned cross-repository workflow, not AGENTS.md policy. For multi-step/cross-turn work create or reuse a Goal with completion_conditions and bounded steps; associate_goal_workflow_session and present_goal_plan. For automatic continuation reuse an exact already-callable durable Agent as controller, otherwise explicitly establish identity + Endpoint + Host carrier. Worker and Goal controller can be the same Agent; neither Window identity nor Goal links grant execution authority. Use checkpoint_goal at recovery-worthy boundaries; finish_coding_task returns sparse Goal follow-up. After fresh validation/review explicitly complete all steps and update_goal. Tiny reads/trivial edits do not require Goal setup.",
+        summary: "Substantial work: on exact Session re-entry reuse explicit active Goal context; otherwise atomically admit a new Goal + Session. Present, checkpoint, verify/review and explicitly complete. Optional auto-resume reuses an explicit durable controller through the separate continuation setup flow.",
+        manifest_purpose: "WebCodex-owned cross-repository workflow, not AGENTS.md policy. work_on_project may return sparse goal_context for active Goals explicitly correlated to the exact authorized Workflow Session. Reuse one exact candidate by calling get_goal and present_goal_plan; with multiple candidates, read candidate details through exact get_goal calls and explicitly choose one before present_goal_plan. Never auto-select or infer from Project, Window, title, or recency. For ordinary new multi-step/cross-turn work without reusable active Goal context, call prepare_goal_workflow with the exact Workflow Session, bounded completion_conditions/steps and optional explicit controller Agent, then present_goal_plan. available=false is inconclusive evidence, not proof of zero active Goals. prepare_goal_workflow is durable admission only: Host carrier setup/readiness remains separate. If auto-resume is required and the chosen controller is not already production-ready, use the existing agent_continuation_setup flow. Use checkpoint_goal at recovery-worthy boundaries; finish_coding_task returns the same sparse active Goal representation as goal_follow_up. After fresh validation/review explicitly complete all steps and update_goal. Low-level create_goal and associate_goal_workflow_session remain available for advanced composition. Tiny reads/trivial edits do not require Goal setup.",
         tools: &[
-            "work_on_project", "create_agent_identity", "rotate_agent_continuation_endpoint",
-            "present_agent_continuation", "get_goal", "create_goal", "associate_goal_workflow_session",
-            "present_goal_plan", "checkpoint_goal", "finish_coding_task", "update_goal",
+            "work_on_project", "get_goal", "prepare_goal_workflow", "present_goal_plan",
+            "checkpoint_goal", "finish_coding_task", "update_goal",
         ],
     },
     ToolRecommendedFlow {
@@ -482,8 +482,8 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     },
     ToolRecommendedFlow {
         name: "browser",
-        summary: "Browser/CDP runtime: discover Browser-capable Runners, launch an owned ephemeral Browser, observe pages/semantic snapshots, act only through opaque identities, then re-observe after navigation or uncertain effects.",
-        manifest_purpose: "Use browser_observe for targets/browsers/pages/snapshot/screenshot and browser_act for the closed launch/new_page/navigate/click/input_text/key/close actions. Browser/Page/Element ids are opaque; navigation stales element ids. Never retry an outcome_unknown effect blindly: follow the returned browser_observe reconciliation call.",
+        summary: "Browser/CDP runtime: discover Browser-capable Runners, launch an owned ephemeral Browser, use adaptive semantic snapshots and diagnostic deltas, act only through opaque identities, then re-observe after navigation or uncertain effects.",
+        manifest_purpose: "Use browser_observe for targets/browsers/pages/snapshot/screenshot/diagnostics and browser_act for the closed launch/new_page/navigate/click/input_text/key/close actions. Snapshot auto mode reduces large pages to actionable controls; diagnostics since_cursor returns only later events. Successful page effects include bounded stability observation but still require a fresh snapshot before reusing element authority. Browser/Page/Element ids are opaque; navigation stales element ids. Never retry an outcome_unknown effect blindly: follow the returned browser_observe reconciliation call.",
         tools: &["browser_observe", "browser_act"],
     },
     ToolRecommendedFlow {

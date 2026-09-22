@@ -1368,6 +1368,7 @@ impl ToolRuntime {
                     result,
                     &self.sessions,
                     session_id,
+                    "business_session",
                     ack,
                     ack_requested,
                 );
@@ -1812,20 +1813,27 @@ impl ToolRuntime {
                 project.clone_from(&resolved.resolved_id);
             }
         }
-        let mut result = self
-            .dispatch_authorized_inner(
-                call,
-                auth,
-                transport,
-                window,
-                ssh_resource.as_deref(),
-                validation_assertion_name,
-                project_resolution,
-                trusted_recording_session_id,
-                trusted_recording_session_project,
-                logical_invocation_id,
-                protocol_capabilities,
-                correlation,
+        let read_scope = super::read_cache::ReadScope::new(
+            auth,
+            session_id.as_deref().or(trusted_recording_session_id),
+        );
+        let mut result = super::read_cache::READ_SCOPE
+            .scope(
+                read_scope,
+                self.dispatch_authorized_inner(
+                    call,
+                    auth,
+                    transport,
+                    window,
+                    ssh_resource.as_deref(),
+                    validation_assertion_name,
+                    project_resolution,
+                    trusted_recording_session_id,
+                    trusted_recording_session_project,
+                    logical_invocation_id,
+                    protocol_capabilities,
+                    correlation,
+                ),
             )
             .await;
         if let Some(requested_project) = requested_project_output {
@@ -1974,6 +1982,7 @@ impl ToolRuntime {
                 tags,
                 priority,
                 requires_ack,
+                delivery_key,
             } => self.post_peer_message_tool(
                 peer_id,
                 kind,
@@ -1981,6 +1990,7 @@ impl ToolRuntime {
                 tags,
                 priority,
                 requires_ack,
+                delivery_key,
                 auth,
                 window,
                 trusted_recording_session_id,
@@ -1999,7 +2009,14 @@ impl ToolRuntime {
             | ToolCall::ResolveSessionMessage { .. }
             | ToolCall::CompleteSessionMessage { .. }
             | ToolCall::SessionDiscussionSummary { .. }) => {
-                self.dispatch_session_tool(call, auth, transport).await
+                self.dispatch_session_tool(
+                    call,
+                    auth,
+                    transport,
+                    window,
+                    trusted_recording_session_id,
+                )
+                .await
             }
 
             call @ (ToolCall::WorkOnProject { .. } | ToolCall::FinishCodingTask { .. }) => {
@@ -2390,6 +2407,36 @@ impl ToolRuntime {
                 .await
             }
 
+            ToolCall::PrepareGoalWorkflow {
+                session_id,
+                title,
+                objective,
+                controller_agent_id,
+                completion_conditions,
+                steps,
+                idempotency_key,
+            } => {
+                self.prepare_goal_workflow(
+                    auth,
+                    session_id,
+                    crate::db::NewGoal {
+                        title,
+                        objective,
+                        controller_agent_id,
+                        completion_conditions,
+                        idempotency_key,
+                        steps: steps
+                            .into_iter()
+                            .map(|step| crate::db::NewGoalStep {
+                                id: step.id,
+                                title: step.title,
+                            })
+                            .collect(),
+                    },
+                )
+                .await
+            }
+
             ToolCall::CreateGoal {
                 title,
                 objective,
@@ -2438,11 +2485,8 @@ impl ToolRuntime {
 
             ToolCall::PresentGoalPlan { goal_id } => self.present_goal_plan(auth, goal_id).await,
 
-            ToolCall::GoalPlanState { goal_id } => self.goal_plan_state(auth, goal_id).await,
-
-            ToolCall::GoalPlanRecheckAttention { goal_id } => {
-                self.goal_plan_recheck_attention_for_window(auth, window, goal_id)
-                    .await
+            ToolCall::GoalPlanSync { goal_id } => {
+                self.goal_plan_sync_for_window(auth, window, goal_id).await
             }
 
             ToolCall::ListGoals {

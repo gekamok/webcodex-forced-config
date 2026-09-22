@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
+import { FolderOpen, Globe2, Share2 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { desktopApi, type QuickShareProvider } from "../../lib/desktop-api";
 import { useLocale } from "../../i18n/locale";
 import { TunnelConfigDiagnostics } from "../connection/TunnelConfigDiagnostics";
 import { PowerShellInstallGuidance } from "../settings/PowerShellInstallGuidance";
 import {
+  desktopCommandDiagnostics,
   desktopErrorPresentation,
   normalizeDesktopError,
 } from "../../i18n/presentation";
@@ -129,14 +131,17 @@ export function FirstRun({ state, onState, chooseModeFirst = false, onComplete }
         <div className="entry-grid">
           <button className="entry-card recommended" onClick={() => setMode("local")} data-webcodex-action="choose-local-setup">
             <span className="entry-badge">{t("first.recommended")}</span>
+            <span className="entry-icon" aria-hidden="true"><FolderOpen /></span>
             <strong>{t("first.localTitle")}</strong>
             <span>{t("first.localDescription")}</span>
           </button>
           <button className="entry-card" onClick={() => setMode("remote")} data-webcodex-action="choose-remote-setup">
+            <span className="entry-icon" aria-hidden="true"><Globe2 /></span>
             <strong>{t("first.remoteTitle")}</strong>
             <span>{t("first.remoteDescription")}</span>
           </button>
           <button className="entry-card" onClick={() => setMode("share")} data-webcodex-action="choose-quick-share-setup">
+            <span className="entry-icon" aria-hidden="true"><Share2 /></span>
             <strong>{t("first.shareTitle")}</strong>
             <span>{t("first.shareDescription")}</span>
           </button>
@@ -146,6 +151,7 @@ export function FirstRun({ state, onState, chooseModeFirst = false, onComplete }
   }
 
   const presentation = error ? desktopErrorPresentation(error, t) : null;
+  const diagnostics = error ? desktopCommandDiagnostics(error) : null;
   const serverInvalid = error?.code === "server_url_invalid" || error?.code === "server_unreachable";
   const pairingInvalid = error?.code === "pairing_code_invalid";
 
@@ -294,6 +300,15 @@ export function FirstRun({ state, onState, chooseModeFirst = false, onComplete }
             <summary>{t("common.details")}</summary>
             <code>{error.code}</code>
             <p>{error.message}</p>
+            {diagnostics && (
+              <dl className="error-diagnostics">
+                {diagnostics.phase && <><dt>phase</dt><dd><code>{diagnostics.phase}</code></dd></>}
+                {diagnostics.logicalCommand && <><dt>command</dt><dd><code>{diagnostics.logicalCommand}</code></dd></>}
+                {diagnostics.executable && <><dt>executable</dt><dd><code>{diagnostics.executable}</code></dd></>}
+                {diagnostics.exitCode !== undefined && <><dt>exit code</dt><dd><code>{diagnostics.exitCode}</code></dd></>}
+                {diagnostics.reasonCode && <><dt>reason</dt><dd><code>{diagnostics.reasonCode}</code></dd></>}
+              </dl>
+            )}
           </details>
           {error.code === "project_not_loaded" && (
             <div className="setup-recovery-actions">

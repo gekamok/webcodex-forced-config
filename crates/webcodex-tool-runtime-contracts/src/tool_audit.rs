@@ -85,6 +85,16 @@ fn browser_act_audit_projection(call: &BrowserActToolCall) -> Value {
             "page_id": page_id,
             "url_present": true,
         }),
+        BrowserActToolCall::Reload {
+            client_id,
+            browser_id,
+            page_id,
+        } => serde_json::json!({
+            "action": "reload",
+            "client_id": client_id,
+            "browser_id": browser_id,
+            "page_id": page_id,
+        }),
         BrowserActToolCall::Click {
             client_id,
             browser_id,
@@ -170,6 +180,16 @@ fn browser_act_audit_projection(call: &BrowserActToolCall) -> Value {
             "browser_id": browser_id,
             "page_id": page_id,
             "key": key.as_str(),
+        }),
+        BrowserActToolCall::ClearDiagnostics {
+            client_id,
+            browser_id,
+            page_id,
+        } => serde_json::json!({
+            "action": "clear_diagnostics",
+            "client_id": client_id,
+            "browser_id": browser_id,
+            "page_id": page_id,
         }),
         BrowserActToolCall::ClosePage {
             client_id,
@@ -352,6 +372,7 @@ fn typed_structured_validation_request_audit(
 #[derive(Debug, Clone, Copy)]
 enum GoalRequestAudit {
     Create,
+    Prepare,
     Get,
     List,
     Update,
@@ -365,7 +386,10 @@ fn typed_goal_request_audit(kind: GoalRequestAudit, arguments: &Value) -> Value 
     };
     let mut out = serde_json::Map::new();
     match kind {
-        GoalRequestAudit::Create => {
+        GoalRequestAudit::Create | GoalRequestAudit::Prepare => {
+            if matches!(kind, GoalRequestAudit::Prepare) {
+                copy_keys(obj, &mut out, &["session_id"]);
+            }
             out.insert(
                 "title_chars".to_string(),
                 Value::from(
@@ -1239,6 +1263,13 @@ fn browser_observation_result_audit(output: &Value) -> Value {
         "count",
         "total_count",
         "truncated",
+        "retained_count",
+        "console_retained",
+        "console_count",
+        "console_truncated",
+        "network_retained",
+        "network_count",
+        "network_truncated",
         "browser_id",
         "page_id",
         "snapshot_generation",
@@ -3715,8 +3746,19 @@ mod browser_privacy_tests {
             "browser_id":"browser_abcdefghijklmnop",
             "page_id":"page_abcdefghijklmnop",
             "node_count":1,
+            "retained_count":200,
+            "truncated":true,
+            "console_retained":200,
+            "console_count":2,
+            "console_truncated":true,
+            "network_retained":300,
+            "network_count":1,
+            "network_truncated":false,
             "pages":[{"title":"PAGE_BODY_SECRET","url":"https://example.test/?secret=QUERY_SECRET"}],
             "nodes":[{"role":"textbox","name":"AX_BODY_SECRET","value":"FORM_VALUE_SECRET","element_id":"element_abcdefghijklmnop"}],
+            "entries":[{"level":"error","text":"CONSOLE_BODY_SECRET"}],
+            "console":[{"level":"error","text":"DIAGNOSTIC_CONSOLE_SECRET"}],
+            "network":[{"method":"GET","url":"https://example.test/?secret=NETWORK_SECRET"}],
             "content_base64":"BASE64_IMAGE_SECRET",
             "raw_dom":"RAW_DOM_SECRET",
             "raw_ax":"RAW_AX_SECRET",
@@ -3726,12 +3768,22 @@ mod browser_privacy_tests {
         assert_eq!(projected["node_count"], 1);
         assert_eq!(projected["page_count"], 1);
         assert_eq!(projected["projected_node_count"], 1);
+        assert_eq!(projected["retained_count"], 200);
+        assert_eq!(projected["console_retained"], 200);
+        assert_eq!(projected["console_count"], 2);
+        assert_eq!(projected["console_truncated"], true);
+        assert_eq!(projected["network_retained"], 300);
+        assert_eq!(projected["network_count"], 1);
+        assert_eq!(projected["network_truncated"], false);
         let serialized = serde_json::to_string(&projected).unwrap();
         for private in [
             "PAGE_BODY_SECRET",
             "QUERY_SECRET",
             "AX_BODY_SECRET",
             "FORM_VALUE_SECRET",
+            "CONSOLE_BODY_SECRET",
+            "DIAGNOSTIC_CONSOLE_SECRET",
+            "NETWORK_SECRET",
             "BASE64_IMAGE_SECRET",
             "RAW_DOM_SECRET",
             "RAW_AX_SECRET",
@@ -3742,6 +3794,9 @@ mod browser_privacy_tests {
         assert!(projected.get("pages").is_none());
         assert!(projected.get("nodes").is_none());
         assert!(projected.get("content_base64").is_none());
+        assert!(projected.get("entries").is_none());
+        assert!(projected.get("console").is_none());
+        assert!(projected.get("network").is_none());
     }
 
     #[test]
@@ -4018,15 +4073,21 @@ impl ToolCallAuditProjection for ToolCall {
                 tail_lines,
                 wait_secs,
                 wake_on,
+                summary_only,
             } => serde_json::json!({
+                "summary_only": summary_only,
                 "item_count": items.len(),
                 "token_count": items
                     .iter()
                     .filter(|item| item.after_observation_token.is_some())
                     .count(),
+                "observation_ref_count": items
+                    .iter()
+                    .filter(|item| item.observation_ref.is_some())
+                    .count(),
                 "job_ids": items
                     .iter()
-                    .map(|item| item.job_id.as_str())
+                    .filter_map(|item| (!item.job_id.is_empty()).then_some(item.job_id.as_str()))
                     .collect::<Vec<_>>(),
                 "tail_lines": tail_lines,
                 "wait_secs": wait_secs,
@@ -4260,6 +4321,23 @@ impl ToolCallAuditProjection for ToolCall {
                 "items": items,
                 "with_line_numbers": with_line_numbers,
             }),
+            Self::PrepareGoalWorkflow {
+                session_id,
+                title,
+                objective,
+                controller_agent_id,
+                idempotency_key,
+                ..
+            } => typed_goal_request_audit(
+                GoalRequestAudit::Prepare,
+                &serde_json::json!({
+                    "session_id": session_id,
+                    "title": title,
+                    "objective": objective,
+                    "controller_agent_id": controller_agent_id,
+                    "idempotency_key": idempotency_key,
+                }),
+            ),
             Self::CreateGoal {
                 title,
                 objective,
@@ -4294,12 +4372,12 @@ impl ToolCallAuditProjection for ToolCall {
                 GoalRequestAudit::Get,
                 &serde_json::json!({"goal_id": goal_id}),
             ),
-            Self::PresentGoalPlan { goal_id }
-            | Self::GoalPlanState { goal_id }
-            | Self::GoalPlanRecheckAttention { goal_id } => typed_goal_request_audit(
-                GoalRequestAudit::Get,
-                &serde_json::json!({"goal_id": goal_id}),
-            ),
+            Self::PresentGoalPlan { goal_id } | Self::GoalPlanSync { goal_id } => {
+                typed_goal_request_audit(
+                    GoalRequestAudit::Get,
+                    &serde_json::json!({"goal_id": goal_id}),
+                )
+            }
             Self::ListGoals {
                 lifecycle,
                 offset,
@@ -5440,6 +5518,7 @@ impl ToolCallAuditProjection for ToolCall {
                 reply_to,
                 priority,
                 requires_ack,
+                delivery_key: _,
             } => serde_json::json!({
                 "session_id": session_id,
                 "kind": kind,
@@ -5457,6 +5536,7 @@ impl ToolCallAuditProjection for ToolCall {
                 tags,
                 priority,
                 requires_ack,
+                delivery_key: _,
             } => serde_json::json!({
                 "peer_id": peer_id,
                 "kind": kind,

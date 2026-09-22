@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use webcodex_core::apply_patch_shared::ApplyPatchMatchingMode;
-use webcodex_core::job_observation::MAX_JOB_OBSERVATION_TOKEN_LEN;
+use webcodex_core::job_observation::{
+    ObservationRefRegistry, MAX_JOB_OBSERVATION_TOKEN_LEN, MAX_OBSERVATION_REF_LEN,
+};
 use webcodex_core::lsp_bridge::{
     CallHierarchyDirection, DEFAULT_CALL_HIERARCHY_DEPTH, DEFAULT_CALL_HIERARCHY_LIMIT,
 };
@@ -339,9 +341,15 @@ pub struct SearchProjectTextsQuery {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ObserveJobsItem {
-    /// Existing opaque runtime Job id.
+    /// Existing opaque runtime Job id. Required unless `observation_ref` is supplied.
+    /// The empty string is used only as the serde default for an unresolved ref selector and
+    /// never reaches canonical Job observation.
     #[schemars(length(min = 1))]
-    #[serde(deserialize_with = "deserialize_non_empty_job_id")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_empty_job_id",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub job_id: String,
     /// Optional opaque Job-bound lifecycle/log-delta token from the latest observation. Return it
     /// unchanged without interpreting its cursor state. It is not execution identity or retry
@@ -350,6 +358,26 @@ pub struct ObserveJobsItem {
     #[schemars(length(max = 62))]
     #[serde(default, deserialize_with = "deserialize_optional_observation_token")]
     pub after_observation_token: Option<String>,
+    /// Compact server-issued continuation selector for one exact prior Job observation state.
+    /// Mutually exclusive with a non-empty `job_id`; when supplied, callers must not also supply
+    /// `after_observation_token`. Unknown or expired refs fail closed at observation time.
+    #[schemars(length(min = 3, max = 22))]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_observation_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observation_ref: Option<String>,
+}
+
+impl ObserveJobsItem {
+    pub fn resolved(job_id: String, after_observation_token: Option<String>) -> Self {
+        Self {
+            job_id,
+            after_observation_token,
+            observation_ref: None,
+        }
+    }
 }
 
 /// Which observable changes may end a bounded batch Job wait early.
@@ -395,6 +423,21 @@ where
         return Err(serde::de::Error::custom("job_id must not be empty"));
     }
     Ok(job_id)
+}
+
+fn deserialize_optional_observation_ref<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    if let Some(value) = value.as_deref() {
+        if !ObservationRefRegistry::is_ref_syntax(value) {
+            return Err(serde::de::Error::custom(
+                "observation_ref must use compact ~j<decimal> syntax",
+            ));
+        }
+    }
+    Ok(value)
 }
 
 fn deserialize_optional_observation_token<'de, D>(
@@ -456,17 +499,85 @@ where
             "items must contain between 1 and 8 entries",
         ));
     }
-    let mut job_ids = HashSet::with_capacity(items.len());
-    if let Some(duplicate) = items
-        .iter()
-        .map(|item| item.job_id.as_str())
-        .find(|job_id| !job_ids.insert(*job_id))
-    {
-        return Err(serde::de::Error::custom(format!(
-            "duplicate job_id in items: {duplicate}"
-        )));
+    let mut selectors = HashSet::with_capacity(items.len());
+    for item in &items {
+        let has_job_id = !item.job_id.is_empty();
+        match (has_job_id, item.observation_ref.as_deref()) {
+            (false, None) => {
+                return Err(serde::de::Error::custom(
+                    "each observe_jobs item must supply either job_id or observation_ref",
+                ));
+            }
+            (true, Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "observation_ref and job_id are mutually exclusive in the same item",
+                ));
+            }
+            (false, Some(_)) if item.after_observation_token.is_some() => {
+                return Err(serde::de::Error::custom(
+                    "after_observation_token must be absent when observation_ref is supplied",
+                ));
+            }
+            _ => {}
+        }
+        let selector = item
+            .observation_ref
+            .as_deref()
+            .unwrap_or(item.job_id.as_str());
+        if !selectors.insert(selector) {
+            return Err(serde::de::Error::custom(format!(
+                "duplicate selector in observe_jobs items: {selector}"
+            )));
+        }
     }
     Ok(items)
+}
+
+fn observe_jobs_items_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 8,
+        "items": {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "job_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Existing opaque runtime Job id."
+                        },
+                        "after_observation_token": {
+                            "anyOf": [
+                                {"type": "string", "maxLength": MAX_JOB_OBSERVATION_TOKEN_LEN},
+                                {"type": "null"}
+                            ],
+                            "description": "Optional opaque Job-bound lifecycle/log-delta token from the latest observation. Return it unchanged without interpreting its cursor state. It is not execution identity or retry authority; a stale Server epoch resets the bounded log projection."
+                        },
+                        "observation_ref": {"type": "null"}
+                    },
+                    "required": ["job_id"]
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "after_observation_token": {"type": "null"},
+                        "observation_ref": {
+                            "type": "string",
+                            "pattern": "^~j[0-9]+$",
+                            "minLength": 3,
+                            "maxLength": MAX_OBSERVATION_REF_LEN,
+                            "description": "Compact server-issued continuation selector for one exact prior Job observation state. Unknown or expired refs fail closed."
+                        }
+                    },
+                    "required": ["observation_ref"]
+                }
+            ]
+        }
+    })
 }
 
 fn deserialize_observe_jobs_tail_lines<'de, D>(deserializer: D) -> Result<usize, D::Error>
@@ -550,6 +661,25 @@ impl HostFileImportProvenance {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserSnapshotModeCall {
+    #[default]
+    Auto,
+    Full,
+    Interactive,
+}
+
+impl BrowserSnapshotModeCall {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Full => "full",
+            Self::Interactive => "interactive",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BrowserObserveToolCall {
@@ -577,6 +707,50 @@ pub enum BrowserObserveToolCall {
         #[schemars(length(min = 1, max = 128))]
         #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
         page_id: String,
+        #[serde(default)]
+        mode: BrowserSnapshotModeCall,
+        #[schemars(range(min = 1, max = 256))]
+        #[serde(default)]
+        max_nodes: Option<usize>,
+        #[schemars(range(min = 1, max = 32))]
+        #[serde(default)]
+        max_depth: Option<u32>,
+    },
+    Console {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^browser_[A-Za-z0-9_-]{16,64}$"))]
+        browser_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
+        page_id: String,
+    },
+    Network {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^browser_[A-Za-z0-9_-]{16,64}$"))]
+        browser_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
+        page_id: String,
+    },
+    Diagnostics {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^browser_[A-Za-z0-9_-]{16,64}$"))]
+        browser_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
+        page_id: String,
+        #[serde(default)]
+        include_all_console: bool,
+        #[serde(default)]
+        include_all_network: bool,
+        #[serde(default)]
+        since_cursor: Option<u64>,
     },
     Screenshot {
         #[schemars(length(min = 1, max = 128))]
@@ -597,6 +771,9 @@ impl BrowserObserveToolCall {
             Self::Browsers { .. } => "browsers",
             Self::Pages { .. } => "pages",
             Self::Snapshot { .. } => "snapshot",
+            Self::Console { .. } => "console",
+            Self::Network { .. } => "network",
+            Self::Diagnostics { .. } => "diagnostics",
             Self::Screenshot { .. } => "screenshot",
         }
     }
@@ -668,6 +845,16 @@ pub enum BrowserActToolCall {
         #[schemars(length(min = 1, max = 8192))]
         #[schemars(regex(pattern = "^https?://"))]
         url: String,
+    },
+    Reload {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^browser_[A-Za-z0-9_-]{16,64}$"))]
+        browser_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
+        page_id: String,
     },
     Click {
         #[schemars(length(min = 1, max = 128))]
@@ -759,6 +946,16 @@ pub enum BrowserActToolCall {
         page_id: String,
         key: BrowserKeyCall,
     },
+    ClearDiagnostics {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^browser_[A-Za-z0-9_-]{16,64}$"))]
+        browser_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
+        page_id: String,
+    },
     ClosePage {
         #[schemars(length(min = 1, max = 128))]
         client_id: String,
@@ -784,12 +981,14 @@ impl BrowserActToolCall {
             Self::Launch { .. } => "launch",
             Self::NewPage { .. } => "new_page",
             Self::Navigate { .. } => "navigate",
+            Self::Reload { .. } => "reload",
             Self::Click { .. } => "click",
             Self::InputText { .. } => "input_text",
             Self::SelectOption { .. } => "select_option",
             Self::SetValue { .. } => "set_value",
             Self::UploadFile { .. } => "upload_file",
             Self::Key { .. } => "key",
+            Self::ClearDiagnostics { .. } => "clear_diagnostics",
             Self::ClosePage { .. } => "close_page",
             Self::CloseBrowser { .. } => "close_browser",
         }
@@ -1394,6 +1593,12 @@ pub enum ToolCall {
         /// context-scoped and never resolves, accepts, executes, or gates work.
         #[serde(default)]
         requires_ack: bool,
+        /// Optional stable sender-scoped replay key. While the keyed message/replay metadata remains
+        /// retained, exact retries with the same canonical payload return the original message and survive
+        /// Server restart; reusing the key with a different retained payload fails closed.
+        #[schemars(length(min = 1, max = 128))]
+        #[serde(default)]
+        delivery_key: Option<String>,
     },
 
     /// Send a bounded collaboration message to another recent ChatGPT/host window owned by the
@@ -1423,6 +1628,12 @@ pub enum ToolCall {
         /// again. ACK never grants authority, resolves the message, or requires a reply.
         #[serde(default)]
         requires_ack: bool,
+        /// Optional stable sender-window-scoped replay key. While the keyed peer message remains
+        /// retained, exact retries return the original message and survive Server restart; reusing the key
+        /// with a different retained payload fails closed.
+        #[schemars(length(min = 1, max = 128))]
+        #[serde(default)]
+        delivery_key: Option<String>,
     },
 
     /// List session-local ledger messages in stable newest-first order.
@@ -2663,6 +2874,37 @@ pub enum ToolCall {
         session_id: Option<String>,
     },
 
+    /// Atomically admit one new durable Goal with one exact Workflow Session correlation.
+    /// This is Runtime/Store workflow composition only; it does not establish any Host carrier.
+    PrepareGoalWorkflow {
+        /// Exact Workflow Session independently re-authorized before durable admission.
+        #[schemars(regex(pattern = "^wc_sess_([A-Za-z0-9_-]{16}|[0-9a-f]{32})$"))]
+        session_id: String,
+        /// Fixed durable completion intent; the Server does not evaluate natural-language conditions.
+        /// At most 8 conditions, each additionally bounded to 512 UTF-8 bytes.
+        #[serde(default)]
+        #[schemars(schema_with = "goal_conditions_schema")]
+        completion_conditions: Vec<String>,
+        /// Fixed bounded plan. Stable ids are unique; all steps start pending.
+        #[serde(default)]
+        #[schemars(length(max = 32))]
+        steps: Vec<GoalStepInputCall>,
+        /// Bounded human-readable Goal title.
+        #[schemars(length(min = 1, max = 200))]
+        title: String,
+        /// Bounded authoritative high-level objective/instruction.
+        #[schemars(length(min = 1, max = 8192))]
+        objective: String,
+        /// Optional exact owned durable Agent used only as Goal attention-routing identity.
+        #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
+        #[serde(default)]
+        controller_agent_id: Option<String>,
+        /// Caller-generated composition key. Exact replay returns the same admitted Goal;
+        /// changed reuse fails closed.
+        #[schemars(length(min = 1, max = 128))]
+        idempotency_key: String,
+    },
+
     /// Create explicit high-level durable intent/control state without execution authority.
     CreateGoal {
         /// Fixed durable completion intent; the Server does not evaluate natural-language conditions.
@@ -2709,16 +2951,11 @@ pub enum ToolCall {
         goal_id: String,
     },
 
-    /// App-only exact read of the same bounded Goal Plan projection.
-    GoalPlanState {
-        #[schemars(regex(pattern = "^wc_goal_[A-Za-z0-9_-]{16}$"))]
-        goal_id: String,
-    },
-
-    /// App-only detector request. The Server recomputes activity, current Window
-    /// relation, Session/Goal authority and epoch dedup. No caller timestamps,
-    /// controller selection, Session selection or effect replay is accepted.
-    GoalPlanRecheckAttention {
+    /// App-only effectful synchronization. The Server recomputes activity,
+    /// current Window relation, Session/Goal/Project authority and epoch dedup,
+    /// may commit one durable stall Attention/Wake, then returns the final bounded
+    /// Goal Plan projection. No caller timing or authority selectors are accepted.
+    GoalPlanSync {
         #[schemars(regex(pattern = "^wc_goal_[A-Za-z0-9_-]{16}$"))]
         goal_id: String,
     },
@@ -3682,8 +3919,10 @@ pub enum ToolCall {
     /// item reuses the canonical single-Job observation-token and projection
     /// path; item failures are isolated and no Job is launched or modified.
     ObserveJobs {
-        /// Existing Jobs to observe in input order. Duplicate job_id values are rejected.
-        #[schemars(length(min = 1, max = 8))]
+        /// Existing Jobs to observe in input order. Each item supplies either a raw job_id
+        /// (optionally with after_observation_token) or one compact observation_ref from a prior
+        /// successful response. Selectors are mutually exclusive and duplicate resolved Jobs are rejected.
+        #[schemars(schema_with = "observe_jobs_items_schema")]
         #[serde(deserialize_with = "deserialize_observe_jobs_items")]
         items: Vec<ObserveJobsItem>,
         #[serde(
@@ -3716,6 +3955,13 @@ pub enum ToolCall {
         /// observation.
         #[serde(default)]
         wake_on: ObserveJobsWakeOn,
+        /// Opt-in projection for proven successful structured validation Jobs. Removes routine
+        /// passed-test/progress lines only; preserves diagnostics, lifecycle, counts and log boundaries.
+        /// A returned suggested_call expands retained logs from the original cursor, not the advanced
+        /// observation token. Failures, unknown results and ordinary commands keep their full projection.
+        #[serde(default)]
+        #[schemars(extend("default" = false))]
+        summary_only: bool,
     },
 
     /// Arm one caller-owned durable one-shot terminal attention for an exact
@@ -5136,11 +5382,11 @@ impl ToolCall {
             Self::SkillInstall { .. } => "skill_install",
             Self::SkillActivate { .. } => "skill_activate",
             Self::SkillRemoveRevision { .. } => "skill_remove_revision",
+            Self::PrepareGoalWorkflow { .. } => "prepare_goal_workflow",
             Self::CreateGoal { .. } => "create_goal",
             Self::GetGoal { .. } => "get_goal",
             Self::PresentGoalPlan { .. } => "present_goal_plan",
-            Self::GoalPlanState { .. } => "goal_plan_state",
-            Self::GoalPlanRecheckAttention { .. } => "goal_plan_recheck_attention",
+            Self::GoalPlanSync { .. } => "goal_plan_sync",
             Self::CheckpointGoal { .. } => "checkpoint_goal",
             Self::ListGoals { .. } => "list_goals",
             Self::UpdateGoal { .. } => "update_goal",

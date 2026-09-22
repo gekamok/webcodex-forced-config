@@ -4,6 +4,8 @@
 
 Desktop prepares local projects and manages connections. You ask for work in ChatGPT or another AI client. For installation, Tunnel configuration, and system permissions, see the [installation and connection guide](desktop-install.md).
 
+For contributor workflows—frontend/Tauri development, source runtime resolution, NSIS/DMG packaging, and native smoke tests—see [Desktop development](DESKTOP_DEVELOPMENT.md).
+
 ## First use
 
 1. Choose **Use WebCodex on this computer** on the welcome page, the recommended personal setup.
@@ -65,6 +67,8 @@ The first foreground launch with missing Desktop permissions presents an explana
 Desktop's own permission results do not prove that a separately launched Runner is authorized. Computer Use executes in the Runner: grant permissions to the actual process shown by macOS and follow the system's restart guidance. The UI labels unobserved Runner authorization honestly. Windows does not display macOS permission controls.
 
 ## Activity, settings, and background operation
+
+If the local Server exits during startup, expand the error's **Details**. Desktop shows the exit code when available and, for a recognized HTTP listener bind failure, the socket address and OS error code (for example, `127.0.0.1:54611` and `os error 10013`). These diagnostics are extracted from bounded process output; arbitrary log text is not displayed. This does not change port selection or recovery behavior.
 
 **Activity** shows newest entries first. Search content or sources, or select **Warnings and errors only**. Filtering never deletes records.
 

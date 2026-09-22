@@ -26,6 +26,7 @@ mod communication;
 mod computer_tools;
 pub(crate) mod context_projection;
 mod continuation_feedback;
+pub(crate) mod control_sidecar;
 pub(crate) mod conversation_import;
 mod discovery_tools;
 mod dispatch;
@@ -67,6 +68,7 @@ mod project_resolution;
 pub(crate) use project_resolution::ResolvedProject;
 mod project_tools;
 mod projects;
+mod read_cache;
 mod read_files;
 mod read_revisions;
 mod runtime;
@@ -78,6 +80,7 @@ mod search_project_texts;
 mod semantic_navigation;
 mod session_context;
 pub(crate) use session_context::runtime_observation_principal;
+pub(crate) use session_context::SESSION_ATTENTION_MAX_MESSAGES;
 pub(crate) use window_activity::{
     ToolCallCorrelation, WindowActivityGuard, WindowLoopTransition, WorkflowSessionCorrelation,
     WorkflowSessionCorrelationRelation,

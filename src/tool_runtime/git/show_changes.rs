@@ -275,7 +275,7 @@ fn non_git_show_changes_payload_with_observation(
         "git_error": "not a git repository; git-backed diff unavailable",
         "branch": null,
         "upstream_status": "unobserved",
-        "upstream_reason_code": "git_unavailable",
+        "upstream_reason_code": "non_git_project",
         "upstream": null,
         "ahead": null,
         "behind": null,
@@ -316,7 +316,7 @@ fn non_git_show_changes_payload_with_observation(
         "head_exit": null,
         "warnings": [],
         "suggested_next_actions": [
-            "git-backed status/diff unavailable; project is not a git repository",
+            "git-backed status/diff is not applicable; project is not a git repository",
         ],
         "session": null,
         "exit_code": observation.exit_code,
@@ -1464,7 +1464,12 @@ pub(crate) fn parse_show_changes_output_with_observation(
         }
     }
 
-    let suggested_next_actions = if status_observed {
+    let suggested_next_actions = if observation.non_git() {
+        vec![
+            "git-backed status/diff is not applicable; continue with non-git review evidence"
+                .to_string(),
+        ]
+    } else if status_observed {
         suggested_next_actions_for(
             clean.unwrap_or(false),
             untracked > 0,
@@ -1658,33 +1663,18 @@ fn untracked_preview_path_is_invalid(path: &str) -> bool {
 }
 
 fn untracked_preview_path_is_sensitive(path: &str) -> bool {
-    let normalized = path.replace('\\', "/").to_ascii_lowercase();
-    normalized
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .any(|part| {
-            matches!(
-                part,
-                ".git"
-                    | "target"
-                    | "node_modules"
-                    | "project-registry"
-                    | "projects.d"
-                    | "runner.toml"
-                    | "agent.toml"
-                    | "webcodex.env"
-                    | ".env"
-                    | "secrets"
-                    | "tokens"
-                    | "id_rsa"
-                    | "id_ed25519"
-            ) || part.starts_with(".env")
-                || part.starts_with("runner.toml")
-                || part.starts_with("agent.toml")
-                || part.starts_with("webcodex.env")
-                || part.ends_with(".pem")
-                || part.ends_with(".key")
-        })
+    webcodex_core::sensitive_paths::is_secret_path(path)
+        || path
+            .replace('\\', "/")
+            .split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .map(str::to_ascii_lowercase)
+            .any(|part| {
+                matches!(
+                    part.as_str(),
+                    "target" | "node_modules" | "id_rsa" | "id_ed25519"
+                )
+            })
 }
 
 fn untracked_preview_from_bytes(
@@ -2074,11 +2064,17 @@ fn set_show_changes_verdict(output: &mut Value) {
         }
         _ => {}
     }
-    if !git_available || non_git_project {
+    if non_git_project {
+        push_unique_reason(&mut warning_reasons, "non_git_project");
+        push_unique_action(
+            &mut actions,
+            "git-backed status/diff is not applicable; continue with non-git review evidence",
+        );
+    } else if !git_available {
         push_unique_reason(&mut warning_reasons, "git_unavailable");
         push_unique_action(
             &mut actions,
-            "git-backed status/diff unavailable; continue with non-git review evidence",
+            "git-backed status/diff unavailable; inspect Git availability before relying on worktree review",
         );
     }
 

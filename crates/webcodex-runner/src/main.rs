@@ -129,7 +129,6 @@ fn usage() -> &'static str {
      --config overrides the profile-derived default.\n\n\
      Environment:\n\
        WEBCODEX_RUNNER_CONFIG     default config path override\n\
-       WEBCODEX_AGENT_CONFIG      legacy alias for WEBCODEX_RUNNER_CONFIG\n\
      Example runner.toml:\n\
        server_url = \"https://v4.yyjeqhc.cn\"\n\
        token = \"...\"\n\
@@ -232,6 +231,12 @@ where
                 return Err(
                     "WEBCODEX_RUNNER_CONFIG and legacy WEBCODEX_AGENT_CONFIG cannot both be set"
                         .to_string(),
+                );
+            }
+            if runner_config_env.is_none() && legacy_agent_config_env.is_some() {
+                eprintln!(
+                    "webcodex-runner warning: WEBCODEX_AGENT_CONFIG is deprecated; use WEBCODEX_RUNNER_CONFIG instead. Legacy startup compatibility will be removed in WebCodex {}.",
+                    runner_config::paths::LEGACY_RUNNER_CONFIG_REMOVAL_VERSION
                 );
             }
             runner_config_env
@@ -1667,6 +1672,9 @@ fn runner_build_info() -> runner_protocol::RunnerBuildInfo {
         version: Some(info.version.to_string()),
         git_commit: info.git_commit.map(str::to_string),
         git_dirty: info.git_dirty,
+        built_at: info.built_at.map(str::to_string),
+        target: info.target.map(str::to_string),
+        architecture: info.architecture.map(str::to_string),
     }
 }
 
@@ -2496,6 +2504,14 @@ fn main() {
             std::process::exit(code);
         }
     };
+    if config_path.file_name().and_then(|name| name.to_str())
+        == Some(runner_config::paths::LEGACY_AGENT_CONFIG_FILE)
+    {
+        eprintln!(
+            "webcodex-runner warning: legacy Runner config filename 'agent.toml' is deprecated; rename it to 'runner.toml' before WebCodex {}.",
+            runner_config::paths::LEGACY_RUNNER_CONFIG_REMOVAL_VERSION
+        );
+    }
     let cfg = match load_config(&config_path) {
         Ok(cfg) => cfg,
         Err(e) => {

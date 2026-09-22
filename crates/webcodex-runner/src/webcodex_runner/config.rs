@@ -76,9 +76,8 @@ pub(crate) struct RunnerConfig {
     pub(crate) host_context: Option<RunnerHostContext>,
     #[serde(default)]
     pub(crate) project_registry_dir: Option<PathBuf>,
-    /// Legacy config spelling retained only for load-time compatibility. A
-    /// loaded config is normalized into `project_registry_dir` and clears this
-    /// field so runtime comparisons operate on one effective registry path.
+    /// Legacy config spelling accepted only during the 0.4.x migration window.
+    /// `load_config` normalizes it into `project_registry_dir` before runtime use.
     #[serde(default, rename = "projects_dir")]
     pub(crate) legacy_projects_dir: Option<PathBuf>,
     /// Minimum delay after an empty polling response. Repeated idle polls back
@@ -1589,10 +1588,6 @@ pub(crate) fn load_config(path: &Path) -> Result<RunnerConfig, String> {
     let effective =
         effective_allowed_roots(&cfg.policy.allowed_roots, cfg.policy.allow_cwd_anywhere)?;
     cfg.policy.allowed_roots = effective;
-    // Normalize old/new config spellings into one effective registry path. Two
-    // explicit fields are ambiguous and fail closed rather than guessing
-    // precedence. With neither field configured, select the on-disk layout
-    // using the shared four-state compatibility contract.
     cfg.project_registry_dir = match (
         cfg.project_registry_dir.take(),
         cfg.legacy_projects_dir.take(),
@@ -1603,7 +1598,14 @@ pub(crate) fn load_config(path: &Path) -> Result<RunnerConfig, String> {
                     .to_string(),
             );
         }
-        (Some(path), None) | (None, Some(path)) => Some(path),
+        (Some(path), None) => Some(path),
+        (None, Some(path)) => {
+            eprintln!(
+                "webcodex-runner warning: Runner config field 'projects_dir' is deprecated; use 'project_registry_dir' instead. Legacy startup compatibility will be removed in WebCodex {}.",
+                crate::runner_config::paths::LEGACY_RUNNER_CONFIG_REMOVAL_VERSION
+            );
+            Some(path)
+        }
         (None, None) => Some(default_project_registry_dir()?),
     };
     validate_shell_config(&cfg.shell)?;
@@ -2161,6 +2163,32 @@ mod acp_config_tests {
     }
 
     #[test]
+    fn desktop_owned_acp_marker_is_configuration_metadata_not_provider_inventory() {
+        let executable = toml::Value::String(agent().executable).to_string();
+        let source = format!(
+            r#"
+max_concurrent_runs = 1
+permission_timeout_secs = 5
+[[agents]]
+id = "pi"
+name = "Pi Agent"
+executable = {executable}
+args = ["--acp"]
+desktop_owner = "fixture-desktop-owner"
+[agents.env_from_env]
+OPENAI_API_KEY = "SUB2API_API_KEY"
+"#
+        );
+        let config: AcpConfig = toml::from_str(&source).unwrap();
+        validate_acp_config(&config).unwrap();
+        assert_eq!(config.agents[0].id, "pi");
+        assert_eq!(
+            config.agents[0].env_from_env["OPENAI_API_KEY"],
+            "SUB2API_API_KEY"
+        );
+    }
+
+    #[test]
     fn acp_env_mapping_rejects_webcodex_pat() {
         for (destination, source) in [("WEBCODEX_PAT", "SOURCE"), ("DEST", "WEBCODEX_PAT")] {
             let mut sensitive = agent();
@@ -2190,7 +2218,7 @@ mod acp_config_tests {
         configured.allowed_config_options.push("model".to_string());
         configured.forced_config.insert(
             "model".to_string(),
-            CodingAgentConfigValue::String("gpt-5.6-luna".to_string()),
+            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
         );
         assert!(validate(configured)
             .unwrap_err()
@@ -2213,7 +2241,7 @@ mod acp_config_tests {
         let mut configured = agent();
         configured.forced_config.insert(
             "model".to_string(),
-            CodingAgentConfigValue::String("gpt-5.6-luna".to_string()),
+            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
         );
         configured
             .forced_config
@@ -2238,14 +2266,14 @@ executable = {executable:?}
 allowed_config_options = ["mode"]
 
 [agents.forced_config]
-model = "gpt-5.6-luna"
+model = "gpt-6-luna"
 reasoning_effort = "max"
 "#
         ))
         .unwrap();
         assert_eq!(
             parsed.agents[0].forced_config.get("model"),
-            Some(&CodingAgentConfigValue::String("gpt-5.6-luna".to_string()))
+            Some(&CodingAgentConfigValue::String("gpt-6-luna".to_string()))
         );
         validate_acp_config(&parsed).unwrap();
     }

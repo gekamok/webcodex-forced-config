@@ -1,7 +1,10 @@
+mod coding_agents;
 mod connections;
 mod mcp_providers;
 #[cfg(test)]
 mod reconfiguration_tests;
+mod runner_capability_grant;
+mod ssh_resources;
 mod workspace;
 mod workspace_settings;
 use crate::activity::{ActivityEventKind, ActivityLevel, ActivityLog};
@@ -30,7 +33,7 @@ use serde_json::Value;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,6 +42,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(20);
+const STALE_LOOPBACK_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const RUNNER_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const PROJECT_READY_TIMEOUT: Duration = Duration::from_secs(20);
 const QUICK_SHARE_READY_TIMEOUT: Duration = Duration::from_secs(90);
@@ -48,6 +52,7 @@ const SHUTDOWN_OPERATION_WAIT: Duration = Duration::from_secs(5);
 const DESKTOP_STATE_MAX_BYTES: u64 = 256 * 1024;
 const DESKTOP_SERVER_ENV_MAX_BYTES: u64 = 256 * 1024;
 const DESKTOP_MCP_COMPACT_SCHEMAS: &str = "true";
+const DESKTOP_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT: &str = "true";
 static NEXT_STATE_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 type SharedSupervisor = Arc<Mutex<ProcessSupervisor>>;
@@ -60,6 +65,7 @@ struct ChatGptActivityProbe {
 
 pub struct AppState {
     core: Mutex<Option<DesktopCore>>,
+    ssh_resources: Mutex<crate::ssh_resources::SshResourcesManager>,
     published: Arc<RwLock<DesktopStateSnapshot>>,
     supervisor: SharedSupervisor,
     activity: ActivityLog,
@@ -78,6 +84,7 @@ impl AppState {
         let connections = core.connections.clone();
         Ok(Self {
             core: Mutex::new(Some(core)),
+            ssh_resources: Mutex::new(crate::ssh_resources::SshResourcesManager::default()),
             published,
             supervisor,
             connections,
@@ -567,12 +574,13 @@ fn can_refresh_legacy_runner(snapshot: Option<crate::process::ProcessSnapshot>) 
 
 pub struct DesktopCore {
     data_dir: PathBuf,
-    default_project_dir: PathBuf,
     config_path: PathBuf,
     config: StoredDesktopConfig,
     tunnel_config: TunnelConfig,
     mcp_providers: crate::mcp_providers::McpProviderStore,
     mcp_applied_revision: Option<u64>,
+    coding_agents: crate::coding_agents::CodingAgentStore,
+    coding_agents_applied_revision: Option<u64>,
     connections: ConnectionRuntimes,
     snapshot: DesktopStateSnapshot,
     adapter: WebCodexAdapter,
@@ -584,7 +592,6 @@ pub struct DesktopCore {
 impl DesktopCore {
     fn new(data_dir: PathBuf, resource_dir: PathBuf) -> DesktopResult<Self> {
         let activity = ActivityLog::default();
-        let default_project_dir = default_management_project_dir(&data_dir, &resource_dir);
         let config_path = data_dir.join("desktop-state.json");
         let config = load_config(&config_path, &activity)?;
         let tunnel_config = TunnelConfig::load(
@@ -624,16 +631,19 @@ impl DesktopCore {
         };
         let mcp_providers = crate::mcp_providers::McpProviderStore::load(&data_dir);
         snapshot.mcp_providers = mcp_providers.snapshot(None);
+        let coding_agents = crate::coding_agents::CodingAgentStore::load(&data_dir);
+        snapshot.coding_agents = coding_agents.snapshot(None);
         let published = Arc::new(RwLock::new(snapshot.clone()));
         let supervisor = Arc::new(Mutex::new(ProcessSupervisor::new(activity.clone())));
         Ok(Self {
             data_dir,
-            default_project_dir,
             config_path,
             config,
             tunnel_config,
             mcp_providers,
             mcp_applied_revision: None,
+            coding_agents,
+            coding_agents_applied_revision: None,
             connections: ConnectionRuntimes::default(),
             snapshot,
             adapter: WebCodexAdapter::new(Some(resource_dir.join("webcodex-runtime"))),
@@ -796,6 +806,9 @@ impl DesktopCore {
 
     fn publish_snapshot(&mut self) -> DesktopStateSnapshot {
         self.snapshot.mcp_providers = self.mcp_providers.snapshot(self.mcp_applied_revision);
+        self.snapshot.coding_agents = self
+            .coding_agents
+            .snapshot(self.coding_agents_applied_revision);
         self.project_connections();
         self.snapshot.current_operation = None;
         self.snapshot.activity_sequence = self.activity.latest_sequence();
@@ -1066,31 +1079,17 @@ impl DesktopCore {
         cancellation: &CancellationContext,
     ) -> DesktopResult<DesktopStateSnapshot> {
         cancellation.check()?;
-        let project = match project_path.map(str::trim).filter(|path| !path.is_empty()) {
-            Some(path) => self.adapter.inspect_project(path).await?,
-            None => {
-                tokio::fs::create_dir_all(&self.default_project_dir)
-                    .await
-                    .map_err(|error| {
-                        DesktopError::new(
-                            "default_project_unavailable",
-                            "Desktop could not prepare its default management project",
-                            "Check that the WebCodex Desktop install directory is writable, or choose another project from Change runtime mode.",
-                        )
-                        .with_details(serde_json::json!({ "io_kind": format!("{:?}", error.kind()) }))
-                    })?;
-                let mut project = self
-                    .adapter
-                    .inspect_project(&self.default_project_dir.to_string_lossy())
-                    .await?;
-                // The automatically registered management project should not
-                // also grant authority to register sibling installation folders.
-                // Equality is a valid allowed-root boundary, so keep this
-                // implicit setup scoped to the installation directory itself.
-                project.allowed_root = project.path.clone();
-                project
-            }
-        };
+        let project_path = project_path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| {
+                DesktopError::new(
+                    "project_not_ready",
+                    "Local setup requires an explicit project folder",
+                    "Choose the project folder that this Runner should manage, then retry setup.",
+                )
+            })?;
+        let project = self.adapter.inspect_project(project_path).await?;
         cancellation.check()?;
         let binaries = self.adapter.ensure_binaries(cancellation).await?.clone();
         self.snapshot.binaries = Some(binaries.info());
@@ -1128,12 +1127,9 @@ impl DesktopCore {
         })?;
         cancellation.check()?;
 
-        let server_url = if env_file.is_file() {
+        let mut server_url = if env_file.is_file() {
             ensure_desktop_server_defaults(&env_file)?;
-            self.adapter
-                .server_status(None, Some(&env_file), None, cancellation)
-                .await?
-                .probe_url
+            desktop_server_url_from_env(&env_file)?
         } else {
             let listen = reserve_loopback_address()?;
             let status = self
@@ -1143,23 +1139,88 @@ impl DesktopCore {
             ensure_desktop_server_defaults(&env_file)?;
             status.probe_url
         };
+        let mut server_deadline = Deadline::after(SERVER_READY_TIMEOUT);
+        let server_owned = process_is_active(self.process_snapshot(ProcessKey::LocalServer).await);
+        let mut stale_loopback_conflict = false;
+        let running = if !server_owned {
+            match loopback_socket_from_server_url(&server_url) {
+                Some(address) => match TcpListener::bind(address) {
+                    Ok(listener) => {
+                        drop(listener);
+                        false
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+                        ) =>
+                    {
+                        stale_loopback_conflict = true;
+                        self.adapter
+                            .server_status_until(
+                                Some(&server_url),
+                                Some(&env_file),
+                                None,
+                                cancellation,
+                                Deadline::after(STALE_LOOPBACK_PROBE_TIMEOUT),
+                            )
+                            .await
+                            .is_ok_and(|status| status.http_reachable)
+                    }
+                    Err(_) => self
+                        .adapter
+                        .server_status_until(
+                            Some(&server_url),
+                            Some(&env_file),
+                            None,
+                            cancellation,
+                            server_deadline,
+                        )
+                        .await
+                        .is_ok_and(|status| status.http_reachable),
+                },
+                None => self
+                    .adapter
+                    .server_status_until(
+                        Some(&server_url),
+                        Some(&env_file),
+                        None,
+                        cancellation,
+                        server_deadline,
+                    )
+                    .await
+                    .is_ok_and(|status| status.http_reachable),
+            }
+        } else {
+            self.adapter
+                .server_status_until(
+                    Some(&server_url),
+                    Some(&env_file),
+                    None,
+                    cancellation,
+                    server_deadline,
+                )
+                .await
+                .is_ok_and(|status| status.http_reachable)
+        };
+        cancellation.check()?;
+        if !running && !server_owned && stale_loopback_conflict {
+            if let Some(recovered_url) =
+                recover_stale_desktop_loopback_address(&env_file, &server_url)?
+            {
+                server_url = recovered_url;
+                server_deadline = Deadline::after(SERVER_READY_TIMEOUT);
+                self.activity.push(
+                    ActivityEventKind::StateRecovered,
+                    "desktop",
+                    ActivityLevel::Warning,
+                    "Recovered the local Server from an unavailable saved loopback address",
+                );
+            }
+        }
         let reusable_identity = identity_from_config(&self.config)
             .filter(|identity| same_server(&identity.server_url, &server_url));
         let saved_runner_client_id = stored_runner_client_id(&self.config);
-        cancellation.check()?;
-
-        let server_deadline = Deadline::after(SERVER_READY_TIMEOUT);
-        let running = self
-            .adapter
-            .server_status_until(
-                Some(&server_url),
-                Some(&env_file),
-                None,
-                cancellation,
-                server_deadline,
-            )
-            .await
-            .is_ok_and(|status| status.http_reachable);
         cancellation.check()?;
         let server_started = if !running {
             if server_deadline.is_elapsed() {
@@ -1978,16 +2039,16 @@ impl DesktopCore {
             }
             if let Some(process) = self.process_snapshot(ProcessKey::LocalServer).await {
                 if matches!(process.phase, ProcessPhase::Exited | ProcessPhase::Failed) {
+                    let diagnostics = self.supervisor.lock().await.server_startup_diagnostics();
                     self.cleanup_readiness_process(
                         ProcessKey::LocalServer,
                         deadline,
                         cleanup_owned_process,
                     )
                     .await;
-                    return Err(DesktopError::new(
-                        "server_start_failed",
-                        "The Desktop-owned WebCodex Server exited during startup",
-                        "Open Activity for safe diagnostics and retry.",
+                    return Err(crate::process::startup::server_start_error(
+                        process.exit_code,
+                        diagnostics.as_ref(),
                     ));
                 }
             }
@@ -2261,6 +2322,11 @@ fn ensure_desktop_server_defaults(path: &Path) -> DesktopResult<()> {
     if !has_key("WEBCODEX_MCP_COMPACT_SCHEMAS") {
         additions.push(format!(
             "WEBCODEX_MCP_COMPACT_SCHEMAS={DESKTOP_MCP_COMPACT_SCHEMAS}"
+        ));
+    }
+    if !has_key("WEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT") {
+        additions.push(format!(
+            "WEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT={DESKTOP_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT}"
         ));
     }
     if additions.is_empty() {
@@ -2628,6 +2694,204 @@ fn desktop_state_unavailable(message: &'static str) -> DesktopError {
     )
 }
 
+fn loopback_socket_from_server_url(server_url: &str) -> Option<SocketAddr> {
+    let url = url::Url::parse(server_url).ok()?;
+    if url.scheme() != "http"
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let port = url.port()?;
+    match url.host()? {
+        url::Host::Ipv4(address) if address.is_loopback() => {
+            Some(SocketAddr::new(address.into(), port))
+        }
+        url::Host::Ipv6(address) if address.is_loopback() => {
+            Some(SocketAddr::new(address.into(), port))
+        }
+        url::Host::Domain(domain) if domain.eq_ignore_ascii_case("localhost") => {
+            Some(SocketAddr::from(([127, 0, 0, 1], port)))
+        }
+        _ => None,
+    }
+}
+
+fn read_desktop_server_env(env_file: &Path) -> DesktopResult<String> {
+    let metadata = std::fs::symlink_metadata(env_file).map_err(|error| {
+        DesktopError::new(
+            "desktop_state_unavailable",
+            "Desktop could not inspect its local Server environment",
+            "Check local app-data permissions and retry.",
+        )
+        .with_details(serde_json::json!({ "io_kind": format!("{:?}", error.kind()) }))
+    })?;
+    if !metadata.is_file() || metadata.len() > DESKTOP_SERVER_ENV_MAX_BYTES {
+        return Err(DesktopError::new(
+            "desktop_state_invalid",
+            "Desktop local Server environment is not a bounded regular file",
+            "Restore the Desktop-owned local Server configuration and retry.",
+        ));
+    }
+    let bytes = std::fs::read(env_file).map_err(|error| {
+        DesktopError::new(
+            "desktop_state_unavailable",
+            "Desktop could not read its local Server environment",
+            "Check local app-data permissions and retry.",
+        )
+        .with_details(serde_json::json!({ "io_kind": format!("{:?}", error.kind()) }))
+    })?;
+    String::from_utf8(bytes).map_err(|_| {
+        DesktopError::new(
+            "desktop_state_invalid",
+            "Desktop local Server environment is not valid UTF-8",
+            "Restore the Desktop-owned local Server configuration and retry.",
+        )
+    })
+}
+
+fn desktop_server_listen_from_env(env_file: &Path) -> DesktopResult<String> {
+    let content = read_desktop_server_env(env_file)?;
+    desktop_server_listen_from_content(&content)
+}
+
+fn desktop_server_listen_from_content(content: &str) -> DesktopResult<String> {
+    let mut listen = None;
+    for line in content.lines() {
+        let candidate = line.trim_start();
+        let candidate = candidate
+            .strip_prefix("export ")
+            .unwrap_or(candidate)
+            .trim_start();
+        let Some((key, value)) = candidate.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "WEBCODEX_ADDR" {
+            continue;
+        }
+        if listen.is_some() {
+            return Err(DesktopError::new(
+                "desktop_state_invalid",
+                "Desktop local Server environment contains duplicate WEBCODEX_ADDR entries",
+                "Restore the Desktop-owned local Server configuration and retry.",
+            ));
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(DesktopError::new(
+                "desktop_state_invalid",
+                "Desktop local Server address is empty",
+                "Restore the Desktop-owned local Server configuration and retry.",
+            ));
+        }
+        listen = Some(value.to_string());
+    }
+    listen.ok_or_else(|| {
+        DesktopError::new(
+            "desktop_state_invalid",
+            "Desktop local Server environment does not contain WEBCODEX_ADDR",
+            "Restore the Desktop-owned local Server configuration and retry.",
+        )
+    })
+}
+
+fn desktop_server_url_from_env(env_file: &Path) -> DesktopResult<String> {
+    let listen = desktop_server_listen_from_env(env_file)?;
+    let server_url = format!("http://{listen}");
+    if loopback_socket_from_server_url(&server_url).is_none() {
+        return Err(DesktopError::new(
+            "desktop_state_invalid",
+            "Desktop local Server address is not a valid loopback endpoint",
+            "Restore the Desktop-owned local Server configuration and retry.",
+        ));
+    }
+    Ok(server_url)
+}
+
+fn recover_stale_desktop_loopback_address(
+    env_file: &Path,
+    server_url: &str,
+) -> DesktopResult<Option<String>> {
+    let Some(address) = loopback_socket_from_server_url(server_url) else {
+        return Ok(None);
+    };
+    match TcpListener::bind(address) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(None)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            let listen = reserve_loopback_address()?;
+            rewrite_desktop_server_address(env_file, &listen)?;
+            Ok(Some(format!("http://{listen}")))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn rewrite_desktop_server_address(env_file: &Path, listen: &str) -> DesktopResult<()> {
+    let content = read_desktop_server_env(env_file)?;
+
+    let mut replaced = 0usize;
+    let mut updated = String::with_capacity(content.len().saturating_add(listen.len()));
+    for segment in content.split_inclusive('\n') {
+        let (body, ending) = if let Some(body) = segment.strip_suffix("\r\n") {
+            (body, "\r\n")
+        } else if let Some(body) = segment.strip_suffix('\n') {
+            (body, "\n")
+        } else {
+            (segment, "")
+        };
+        let candidate = body.trim_start();
+        let candidate = candidate
+            .strip_prefix("export ")
+            .unwrap_or(candidate)
+            .trim_start();
+        let is_address = candidate
+            .split_once('=')
+            .is_some_and(|(key, _)| key.trim() == "WEBCODEX_ADDR");
+        if is_address {
+            replaced = replaced.saturating_add(1);
+            if replaced > 1 {
+                return Err(DesktopError::new(
+                    "desktop_state_invalid",
+                    "Desktop local Server environment contains duplicate WEBCODEX_ADDR entries",
+                    "Restore the Desktop-owned local Server configuration and retry.",
+                ));
+            }
+            let equals = body.find('=').ok_or_else(|| {
+                DesktopError::new(
+                    "desktop_state_invalid",
+                    "Desktop local Server address entry is malformed",
+                    "Restore the Desktop-owned local Server configuration and retry.",
+                )
+            })?;
+            updated.push_str(&body[..=equals]);
+            updated.push_str(listen);
+            updated.push_str(ending);
+        } else {
+            updated.push_str(segment);
+        }
+    }
+    if replaced != 1 {
+        return Err(DesktopError::new(
+            "desktop_state_invalid",
+            "Desktop local Server environment does not contain exactly one WEBCODEX_ADDR entry",
+            "Restore the Desktop-owned local Server configuration and retry.",
+        ));
+    }
+    write_atomic_file(env_file, updated.as_bytes()).map_err(|error| {
+        desktop_state_unavailable("Desktop could not persist its recovered local Server address")
+            .with_details(serde_json::json!({ "io_kind": format!("{:?}", error.kind()) }))
+    })
+}
+
 fn reserve_loopback_address() -> DesktopResult<String> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|_| {
         DesktopError::new(
@@ -2746,28 +3010,6 @@ fn runtime_autostart(config: &StoredDesktopConfig) -> bool {
     })
 }
 
-fn default_management_project_dir(data_dir: &Path, resource_dir: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let _ = data_dir;
-        // The NSIS package is current-user scoped. Use the actual installation
-        // directory as the default management Project so a fresh Desktop is
-        // immediately manageable without asking the user to choose an unrelated
-        // source checkout first. This intentionally grants the Project the same
-        // install-directory authority the user has requested for Desktop
-        // configuration and maintenance.
-        return resource_dir.to_path_buf();
-    }
-    #[cfg(not(windows))]
-    {
-        // A macOS resource directory lives inside the signed app bundle and is
-        // not a mutable workspace. Keep the same management-project semantics
-        // in the per-user Desktop data directory there.
-        let _ = resource_dir;
-        data_dir.join("workspace")
-    }
-}
-
 fn preferred_connection(config: &StoredDesktopConfig) -> RegularConnectionPreference {
     config.preferred_connection.unwrap_or_default()
 }
@@ -2830,15 +3072,19 @@ fn same_project(left: &str, right: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_management_project_uses_safe_platform_location() {
-        let data = PathBuf::from(r"C:\Users\test\AppData\Local\WebCodex");
-        let resources = PathBuf::from(r"D:\Apps\WebCodex Desktop");
-        let project = default_management_project_dir(&data, &resources);
-        #[cfg(windows)]
-        assert_eq!(project, resources);
-        #[cfg(not(windows))]
-        assert_eq!(project, data.join("workspace"));
+    #[tokio::test]
+    async fn local_setup_never_uses_the_install_directory_as_an_implicit_project() {
+        let data = unique_state_dir("explicit-local-project");
+        let resources = data.join("Relocated WebCodex Install");
+        std::fs::create_dir_all(&resources).unwrap();
+        let mut core = DesktopCore::new(data.clone(), resources).unwrap();
+        let error = core
+            .configure_local_setup(None, &CancellationContext::never())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "project_not_ready");
+        assert!(core.snapshot.project.is_none());
+        let _ = std::fs::remove_dir_all(data);
     }
 
     #[test]
@@ -2848,7 +3094,7 @@ mod tests {
         let env_file = dir.join("webcodex.env");
         std::fs::write(
             &env_file,
-            "WEBCODEX_TOKEN=secret\nWEBCODEX_MCP_COMPACT_SCHEMAS=false\n",
+            "WEBCODEX_TOKEN=secret\nWEBCODEX_MCP_COMPACT_SCHEMAS=false\nWEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT=false\n",
         )
         .unwrap();
 
@@ -2857,6 +3103,12 @@ mod tests {
         assert!(once.contains("WEBCODEX_TOKEN=secret\n"));
         assert!(once.contains("WEBCODEX_MCP_COMPACT_SCHEMAS=false\n"));
         assert_eq!(once.matches("WEBCODEX_MCP_COMPACT_SCHEMAS=").count(), 1);
+        assert!(once.contains("WEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT=false\n"));
+        assert_eq!(
+            once.matches("WEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT=")
+                .count(),
+            1
+        );
 
         ensure_desktop_server_defaults(&env_file).unwrap();
         assert_eq!(std::fs::read_to_string(&env_file).unwrap(), once);
@@ -2874,6 +3126,89 @@ mod tests {
         let content = std::fs::read_to_string(&env_file).unwrap();
         assert!(content.starts_with("WEBCODEX_ADDR=127.0.0.1:12345\n"));
         assert!(content.contains("WEBCODEX_MCP_COMPACT_SCHEMAS=true\n"));
+        assert!(content.contains("WEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT=true\n"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stale_desktop_loopback_port_recovery_preserves_other_env_values() {
+        let dir = unique_state_dir("stale-loopback-recovery");
+        std::fs::create_dir_all(&dir).unwrap();
+        let env_file = dir.join("webcodex.env");
+
+        let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let occupied_addr = occupied.local_addr().unwrap();
+        let original = format!(
+            "WEBCODEX_ADDR={occupied_addr}\r\nWEBCODEX_TOKEN=secret-value\r\nWEBCODEX_MCP_COMPACT_SCHEMAS=false\r\nCUSTOM_SETTING=preserved\r\n"
+        );
+        std::fs::write(&env_file, original).unwrap();
+
+        let recovered =
+            recover_stale_desktop_loopback_address(&env_file, &format!("http://{occupied_addr}"))
+                .unwrap()
+                .expect("occupied persisted loopback address should recover");
+        assert_ne!(recovered, format!("http://{occupied_addr}"));
+
+        let recovered_addr =
+            loopback_socket_from_server_url(&recovered).expect("recovered loopback socket");
+        assert_ne!(recovered_addr, occupied_addr);
+        let rebound = TcpListener::bind(recovered_addr)
+            .expect("newly reserved replacement address should be bindable after reservation");
+        drop(rebound);
+
+        let content = std::fs::read_to_string(&env_file).unwrap();
+        assert_eq!(content.matches("WEBCODEX_ADDR=").count(), 1);
+        assert!(content.contains(&format!("WEBCODEX_ADDR={recovered_addr}\r\n")));
+        assert!(content.contains("WEBCODEX_TOKEN=secret-value\r\n"));
+        assert!(content.contains("WEBCODEX_MCP_COMPACT_SCHEMAS=false\r\n"));
+        assert!(content.contains("CUSTOM_SETTING=preserved\r\n"));
+        assert!(!content.contains(&format!("WEBCODEX_ADDR={occupied_addr}\r\n")));
+
+        drop(occupied);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bindable_or_non_loopback_saved_address_is_not_rewritten() {
+        let dir = unique_state_dir("loopback-recovery-noop");
+        std::fs::create_dir_all(&dir).unwrap();
+        let env_file = dir.join("webcodex.env");
+
+        let reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let bindable_addr = reservation.local_addr().unwrap();
+        drop(reservation);
+        let original = format!(
+            "WEBCODEX_ADDR={bindable_addr}\nWEBCODEX_TOKEN=secret\nCUSTOM_SETTING=preserved\n"
+        );
+        std::fs::write(&env_file, &original).unwrap();
+
+        assert_eq!(
+            recover_stale_desktop_loopback_address(&env_file, &format!("http://{bindable_addr}"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(std::fs::read_to_string(&env_file).unwrap(), original);
+
+        assert_eq!(
+            recover_stale_desktop_loopback_address(&env_file, "https://example.com:8443").unwrap(),
+            None
+        );
+        assert_eq!(std::fs::read_to_string(&env_file).unwrap(), original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn desktop_server_address_rewrite_rejects_duplicate_address_entries() {
+        let dir = unique_state_dir("duplicate-server-address");
+        std::fs::create_dir_all(&dir).unwrap();
+        let env_file = dir.join("webcodex.env");
+        let original =
+            "WEBCODEX_ADDR=127.0.0.1:1111\nWEBCODEX_TOKEN=secret\nWEBCODEX_ADDR=127.0.0.1:2222\n";
+        std::fs::write(&env_file, original).unwrap();
+
+        let error = rewrite_desktop_server_address(&env_file, "127.0.0.1:3333").unwrap_err();
+        assert_eq!(error.code, "desktop_state_invalid");
+        assert_eq!(std::fs::read_to_string(&env_file).unwrap(), original);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3877,6 +4212,106 @@ mod tests {
             .expect("stop restarted local runtime");
         drop(core);
         std::fs::remove_dir_all(&data_dir).expect("remove local dogfood app data");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires current-source dogfood binaries and a temporary project"]
+    async fn native_local_stale_loopback_port_dogfood_recovers_to_ready() {
+        let project = std::env::var("WEBCODEX_DESKTOP_DOGFOOD_PROJECT")
+            .expect("WEBCODEX_DESKTOP_DOGFOOD_PROJECT must point to the temporary fixture");
+        let _username_guard = EnvVarGuard::set("USERNAME", "Alice Port Recovery");
+        let temporary_root = std::env::temp_dir()
+            .canonicalize()
+            .expect("resolve the native temporary fixture root");
+        let data_dir = temporary_root.join(format!(
+            "webcodex-desktop-stale-port-dogfood-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let mut core = DesktopCore::new(data_dir.clone(), data_dir.join("test-resources"))
+            .expect("create stale-port dogfood state");
+        let cancellation = CancellationContext::never();
+
+        let first = core
+            .configure_local_setup(Some(&project), &cancellation)
+            .await
+            .expect("initial local setup");
+        assert_eq!(first.readiness.server, ServerReadiness::Ready);
+        assert_eq!(first.readiness.runner, RunnerReadiness::Ready);
+        assert_eq!(first.readiness.project, ProjectReadiness::Ready);
+        let first_runtime = core
+            .config
+            .runtime
+            .as_ref()
+            .expect("initial setup stores runtime")
+            .clone();
+        let first_url = first_runtime.server_url.clone();
+        let first_addr =
+            loopback_socket_from_server_url(&first_url).expect("initial local loopback address");
+        let env_file = first_runtime
+            .server_env_file
+            .clone()
+            .expect("initial local setup stores Server env file");
+
+        core.stop_local_runtime(&cancellation)
+            .await
+            .expect("stop initial runtime");
+        assert!(core
+            .process_snapshot(ProcessKey::LocalServer)
+            .await
+            .is_none());
+        assert!(core
+            .process_snapshot(ProcessKey::LocalRunner)
+            .await
+            .is_none());
+
+        let occupied = TcpListener::bind(first_addr)
+            .expect("occupy the saved local Server port before restart");
+        let restarted = core
+            .configure_local_setup(Some(&project), &cancellation)
+            .await
+            .expect("restart must recover stale persisted loopback port");
+        assert_eq!(restarted.readiness.server, ServerReadiness::Ready);
+        assert_eq!(restarted.readiness.runner, RunnerReadiness::Ready);
+        assert_eq!(restarted.readiness.project, ProjectReadiness::Ready);
+
+        let second_runtime = core
+            .config
+            .runtime
+            .as_ref()
+            .expect("recovered setup stores runtime");
+        assert_ne!(
+            second_runtime.server_url, first_url,
+            "port conflict must migrate the local Server URL"
+        );
+        let second_addr = loopback_socket_from_server_url(&second_runtime.server_url)
+            .expect("recovered local loopback address");
+        assert_ne!(second_addr, first_addr);
+        assert_eq!(
+            occupied
+                .local_addr()
+                .expect("occupied address remains live"),
+            first_addr,
+            "Desktop recovery must not disturb the external process holding the old port"
+        );
+
+        let env = std::fs::read_to_string(&env_file).expect("read recovered Server env");
+        assert!(env.contains(&format!("WEBCODEX_ADDR={second_addr}")));
+        assert!(!env.contains(&format!("WEBCODEX_ADDR={first_addr}")));
+        assert!(
+            core.activity
+                .snapshot()
+                .iter()
+                .any(|entry| entry.event_kind == ActivityEventKind::StateRecovered),
+            "stale port migration must leave a safe recovery activity event"
+        );
+
+        core.stop_local_runtime(&cancellation)
+            .await
+            .expect("stop recovered runtime");
+        drop(occupied);
+        drop(core);
+        std::fs::remove_dir_all(&data_dir).expect("remove stale-port dogfood app data");
     }
 
     #[tokio::test]

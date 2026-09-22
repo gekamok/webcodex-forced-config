@@ -881,6 +881,8 @@ impl ToolRuntime {
             &runtime_status_for_brief,
             runtime_status_call_failed,
         );
+        let coding_agent_providers =
+            project_coding_agent_providers(&resolved.config.client_id, &runtime_status_for_brief);
         let git = self
             .coding_startup_git_summary(
                 &resolved.resolved_id,
@@ -1218,6 +1220,7 @@ impl ToolRuntime {
             force_instruction_load,
             include_instruction_content: startup.include_instruction_content,
             extensions: extensions.as_ref(),
+            coding_agent_providers: &coding_agent_providers,
             git: &git,
             semantic_navigation: &semantic_navigation,
             repository: &repository_overview,
@@ -1458,12 +1461,28 @@ impl ToolRuntime {
         } else {
             project
         };
-        project_work_on_project_output_inner(
+        // Fresh work always starts with Goal admission still undecided. Only an
+        // explicit exact Session re-entry projects previously correlated active
+        // Goals, avoiding an unnecessary Goal-store read (and any surprising
+        // concurrent correlation observation) for a newly created Session.
+        let goal_context = session_id.as_ref().and_then(|_| {
+            startup_brief_from_output(&result.output)
+                .and_then(|brief| brief.pointer("/session/session_id"))
+                .and_then(Value::as_str)
+                .and_then(|session_id| self.active_goal_context_for_session(auth, session_id))
+        });
+        let mut projected = project_work_on_project_output_inner(
             projected_project,
             result.output,
             guidance_profile,
             Some(correlation),
-        )
+        );
+        if projected.success {
+            if let Some(goal_context) = goal_context {
+                projected.output["goal_context"] = goal_context;
+            }
+        }
+        projected
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1778,10 +1797,37 @@ impl ToolRuntime {
             existing_suggested_actions: output.get("suggested_next_actions"),
             session_changed_during_snapshot: false,
         });
-        if let Some(follow_up) = self.goal_follow_up_for_session(auth, &session_id) {
+        if let Some(follow_up) = self.active_goal_context_for_session(auth, &session_id) {
             output["goal_follow_up"] = follow_up;
         }
-        let decision = finish_decision_output(&output);
+        let mut decision = finish_decision_output(&output);
+        if decision
+            .pointer("/task_outcome/blocking")
+            .and_then(Value::as_bool)
+            == Some(false)
+            && output.get("presentation").is_some()
+        {
+            if let Err(result) = self
+                .seal_work_result_changes_for_closeout(
+                    &resolved.resolved_id,
+                    &closeout_session_summary,
+                    auth,
+                )
+                .await
+            {
+                let message = result.error.unwrap_or_else(|| {
+                    "Final changes could not be sealed at coding closeout".to_string()
+                });
+                output["final_warnings"]
+                    .as_array_mut()
+                    .expect("finish final_warnings must remain an array")
+                    .push(json!({
+                        "kind": "work_result_seal_failed",
+                        "message": message,
+                    }));
+                decision = finish_decision_output(&output);
+            }
+        }
         if summary_only {
             return ToolResult::ok(compact_finish_output(&decision));
         }
@@ -2042,6 +2088,11 @@ impl ToolRuntime {
             output["branch"] = result.output.get("branch").cloned().unwrap_or(Value::Null);
             output["head"] = result.output.get("head").cloned().unwrap_or(Value::Null);
             output["clean"] = result.output.get("clean").cloned().unwrap_or(Value::Null);
+            output["non_git_project"] = result
+                .output
+                .get("non_git_project")
+                .cloned()
+                .unwrap_or(json!(false));
             output["counts"] = result
                 .output
                 .get("counts")
@@ -2248,6 +2299,8 @@ struct WorkOnProjectBriefProjection {
     semantic_navigation: WorkOnProjectSemanticNavigationProjection,
     #[serde(default)]
     extensions: Option<Value>,
+    #[serde(default)]
+    coding_agent_providers: Vec<webcodex_core::coding_agent::CodingAgentProviderSummary>,
     repository: Value,
     continuation: WorkOnProjectContinuationProjection,
     blockers: Vec<String>,
@@ -2298,11 +2351,18 @@ struct WorkOnProjectRequiredNullable<T>(Option<T>);
 #[derive(Deserialize)]
 struct WorkOnProjectWorkspaceProjection {
     status: String,
+    git: WorkOnProjectGitProjection,
     git_available: WorkOnProjectRequiredNullable<bool>,
     branch: WorkOnProjectRequiredNullable<String>,
     head: WorkOnProjectRequiredNullable<String>,
     clean: WorkOnProjectRequiredNullable<bool>,
     conflicts: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct WorkOnProjectGitProjection {
+    status: String,
+    reason_code: WorkOnProjectRequiredNullable<String>,
 }
 
 #[derive(Deserialize)]
@@ -2390,6 +2450,7 @@ fn sparse_work_on_project_instruction_source(
 fn sparse_work_on_project_workspace(workspace: WorkOnProjectWorkspaceProjection) -> Value {
     let WorkOnProjectWorkspaceProjection {
         status,
+        git,
         git_available,
         branch,
         head,
@@ -2397,7 +2458,13 @@ fn sparse_work_on_project_workspace(workspace: WorkOnProjectWorkspaceProjection)
         conflicts,
     } = workspace;
     let status_unavailable = status == "unavailable";
-    let mut projected = json!({"status": status});
+    let mut projected = json!({
+        "status": status,
+        "git": {
+            "status": git.status,
+            "reason_code": git.reason_code.0,
+        },
+    });
     if git_available.0 == Some(false) {
         projected["git_available"] = json!(false);
     }
@@ -2526,11 +2593,11 @@ fn project_work_on_project_output_inner(
     }
     if !matches!(
         projection.workspace.status.as_str(),
-        "clean" | "dirty" | "blocked" | "unavailable"
+        "available" | "clean" | "dirty" | "blocked" | "unavailable"
     ) {
         return work_on_project_projection_failed(
             "workspace.status",
-            "clean, dirty, blocked, or unavailable",
+            "available, clean, dirty, blocked, or unavailable",
             "unsupported string",
             None,
         );
@@ -2647,6 +2714,9 @@ fn project_work_on_project_output_inner(
     }
     if let Some(extensions) = projection.extensions {
         result.output["extensions"] = extensions;
+    }
+    if !projection.coding_agent_providers.is_empty() {
+        result.output["coding_agent_providers"] = json!(projection.coding_agent_providers);
     }
     if !project_resolution_is_default {
         let mut project_resolution = json!(projection.project_resolution);
@@ -2838,10 +2908,7 @@ fn workspace_payload_from_show_changes(show_changes: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| json!({}));
     json!({
-        "clean": show_changes
-            .get("clean")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        "clean": show_changes.get("clean").cloned().unwrap_or(Value::Null),
         "git_available": show_changes
             .get("git_available")
             .and_then(Value::as_bool)
@@ -2865,7 +2932,11 @@ fn workspace_payload_from_show_changes(show_changes: &Value) -> Value {
 fn workspace_payload_from_git_summary(git: &Value) -> Value {
     let counts = git.get("counts").cloned().unwrap_or_else(|| json!({}));
     json!({
-        "clean": git.get("clean").and_then(Value::as_bool).unwrap_or(false),
+        "clean": git.get("clean").cloned().unwrap_or(Value::Null),
+        "non_git_project": git
+            .get("non_git_project")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         "git_available": git
             .get("available")
             .and_then(Value::as_bool)
@@ -2885,8 +2956,8 @@ fn finish_decision_output(output: &Value) -> Value {
     let workspace_clean = output
         .get("workspace")
         .and_then(|workspace| workspace.get("clean"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+        .cloned()
+        .unwrap_or(Value::Null);
     let workspace_conflicts = output
         .pointer("/workspace/counts/conflicted")
         .and_then(Value::as_u64)
@@ -2941,7 +3012,7 @@ fn finish_decision_output(output: &Value) -> Value {
 fn compact_finish_output(decision: &Value) -> Value {
     let mut output = json!({
         "summary_only": true,
-        "workspace_clean": decision.get("workspace_clean").cloned().unwrap_or(json!(false)),
+        "workspace_clean": decision.get("workspace_clean").cloned().unwrap_or(Value::Null),
         "workspace_conflicts": decision.get("workspace_conflicts").cloned().unwrap_or(json!(0)),
         "hygiene_clean": decision.get("hygiene_clean").cloned().unwrap_or(json!(true)),
         "hygiene_secret_like_paths": decision.get("hygiene_secret_like_paths").cloned().unwrap_or(json!(0)),
@@ -3084,6 +3155,13 @@ fn runtime_status_check(
 
 fn workspace_check(output: &Value) -> (&'static str, Option<&'static str>) {
     let git = output.get("git").unwrap_or(&Value::Null);
+    if git
+        .get("non_git_project")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return ("pass", Some("non_git_project"));
+    }
     if git.get("available").and_then(Value::as_bool) == Some(false) {
         return ("warn", Some("git_unavailable"));
     }
@@ -3129,6 +3207,34 @@ fn startup_agent_check(
         Some(true) => ("pass", None),
         None => ("warn", Some("agent_health_unknown")),
     }
+}
+
+/// Reuse the already-authorized startup observation, selecting only the Project's
+/// owning Runner. Never combine fleet inventories or choose a default provider.
+pub(crate) fn project_coding_agent_providers(
+    client_id: &str,
+    runtime_status: &Value,
+) -> Vec<webcodex_core::coding_agent::CodingAgentProviderSummary> {
+    runtime_status
+        .pointer("/agents/clients")
+        .and_then(Value::as_array)
+        .and_then(|clients| {
+            clients.iter().find(|client| {
+                client.get("client_id").and_then(Value::as_str) == Some(client_id)
+                    && client.get("connected").and_then(Value::as_bool) == Some(true)
+            })
+        })
+        .and_then(|client| client.get("coding_agent_providers"))
+        .and_then(|providers| {
+            serde_json::from_value::<Vec<webcodex_core::coding_agent::CodingAgentProviderSummary>>(
+                providers.clone(),
+            )
+            .ok()
+        })
+        .filter(|providers| {
+            providers.len() <= webcodex_core::coding_agent::CODING_AGENT_MAX_PROVIDERS
+        })
+        .unwrap_or_default()
 }
 
 fn owning_runner_available(
@@ -3335,11 +3441,7 @@ fn changed_files_count_from_counts(counts: &Value) -> u64 {
 }
 
 fn append_workspace_warnings(workspace: &Value, warnings: &mut Vec<Value>) {
-    if !workspace
-        .get("clean")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    if workspace.get("clean").and_then(Value::as_bool) == Some(false) {
         let conflicted = workspace
             .pointer("/counts/conflicted")
             .and_then(Value::as_u64)
@@ -3363,6 +3465,10 @@ fn append_workspace_warnings(workspace: &Value, warnings: &mut Vec<Value>) {
         .get("git_available")
         .and_then(Value::as_bool)
         .unwrap_or(true)
+        && !workspace
+            .get("non_git_project")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     {
         warnings.push(json!({
             "kind": "git_unavailable",
@@ -3417,6 +3523,41 @@ mod startup_runner_tests {
         assert!(!actions
             .iter()
             .any(|action| action == "review workspace changes with show_changes"));
+    }
+
+    #[test]
+    fn finish_summary_keeps_non_git_cleanliness_not_applicable() {
+        let canonical = json!({
+            "workspace": {
+                "clean": null,
+                "git_available": false,
+                "non_git_project": true,
+                "counts": {},
+            },
+            "jobs": {},
+            "validation": {},
+            "review_evidence": {},
+            "tool_failures": {},
+            "final_warnings": [],
+            "suggested_next_actions": [],
+        });
+        let decision = finish_decision_output(&canonical);
+        assert!(
+            decision["workspace_clean"].is_null(),
+            "non-Git cleanliness must stay unknown/N/A: {decision}"
+        );
+        let warnings = decision["warnings"].as_array().expect("warnings");
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.as_str() == Some("workspace_dirty")),
+            "non-Git workspace must not become dirty: {decision}"
+        );
+        let compact = compact_finish_output(&decision);
+        assert!(
+            compact["workspace_clean"].is_null(),
+            "summary_only must preserve non-Git N/A: {compact}"
+        );
     }
 
     fn resolved_agent(client_id: &str) -> ResolvedProject {

@@ -13,8 +13,8 @@ pub(super) fn compact_tool(tool: &mut Value) {
     if let Some(description) = tool["description"].as_str() {
         let selection = match name.as_str() {
             "work_on_project" => "Start ordinary coding/review with project or client_id+path. Omit session_id for a fresh Workflow Session; supply it only for exact resume. Defaults return project instructions, workflow and extension guidance. Use mode=worktree for an isolated Git worktree.",
-            "tool_manifest" => "Discover tools by intent/category, or pass tool_name for one exact canonical contract and its direct/gateway route. Use exact lookup when arguments or operational details are not already known.",
-            "call_runtime_tool" => "Call one admitted runtime tool with its exact arguments. Use tool_manifest to discover the contract. Prefer an available direct callable; this gateway also supports admitted direct tools when that callable is unavailable. Target validation and authority checks still apply.",
+            "tool_manifest" => "Discover tools by intent/category, or pass tool_name for one exact canonical contract plus route.primary/route.fallback. Discovery never registers a new Host tool. If a direct callable is absent, follow the exact gateway fallback when it is allowed.",
+            "call_runtime_tool" => "Call one admitted runtime tool with its exact arguments. Use tool_manifest to discover the contract. Prefer an available direct callable; ordinary direct tools may fall back here when unavailable, but MCP App presentation tools must use their direct callable while Apps are enabled. Target validation and authority checks still apply.",
             "run_process" => "Run one native executable with literal argv. Use run_shell for shell grammar or a short related command chain. Long work continues as the same Runner-owned Job through observe_jobs; retain the returned continuation instead of redispatching.",
             "run_shell" => "Run shell grammar or a short related command chain. Use run_process for one native executable with literal argv. Long work continues as the same Runner-owned Job through observe_jobs; retain the returned continuation instead of redispatching.",
             "run_detached_process" => "Start a native child that intentionally survives Runner restart or replacement as a durable Job. Duration alone does not require detachment. Requires an idempotency_key; retain the same Job and use observe_jobs or stop_job after handoff uncertainty.",
@@ -30,6 +30,7 @@ pub(super) fn compact_tool(tool: &mut Value) {
     }
     if let Some(schema) = tool.get_mut("inputSchema") {
         compact_input_descriptions(schema);
+        compact_control_sidecar(schema);
         if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
             for (field, property) in properties {
                 if let (Some(description), Some(Value::String(copy))) = (
@@ -44,8 +45,8 @@ pub(super) fn compact_tool(tool: &mut Value) {
         // session_id keeps its own canonical-derived copy and requiredness.
         // Nested IDs/resolution have no description; keep their type hints here.
         for (pointer, description) in [
-            ("/properties/recording_session_id", "Recorder wc_sess_* provenance only; never authority or a business Session target."),
-            ("/properties/ack_session_message_ids", "ACK-required wc_msg_* IDs retained in model context; repeat while retained; never resolves or authorizes."),
+            ("/properties/recording_session_id", "Optional explicit wc_sess_* recorder for one exact Workflow Session; never execution/business authority. If omitted, authorized same-Window affinity may still deliver and ACK Session collaboration without recording."),
+            ("/properties/ack_session_message_ids", "ACK-required wc_msg_* IDs retained in model context; Session ACK uses explicit recorder or authorized same-Window affinity; never resolves or authorizes."),
             ("/properties/session_message_resolution", "Resolve one handled non-todo recorder message by exact wc_msg_*; ACK separately if required. Independent of call success."),
             ("/properties/context_request", "Post-result sidecar keys; no authority: project.instructions, webcodex.workflow, jobs.attention, skills.catalog, plugins.catalog, memory.bootstrap."),
             ("/properties/context_request/items", "Context key; unsupported keys are nonfatal."),
@@ -59,6 +60,23 @@ pub(super) fn compact_tool(tool: &mut Value) {
         }
         compact_discovery_validation_annotations(schema);
     }
+}
+
+fn compact_control_sidecar(schema: &mut Value) {
+    let Some(control) = schema
+        .pointer_mut("/properties/_control")
+        .filter(|value| value.is_object())
+    else {
+        return;
+    };
+    // Full MCP discovery retains the exact closed per-kind canonical schemas.
+    // Compact discovery is only a model-selection copy, so do not repeat those
+    // large canonical payload schemas on every ordinary tool. Runtime stripping,
+    // closed enum parsing, and canonical ToolCall parsing remain unchanged.
+    *control = serde_json::json!({
+        "type": "object",
+        "description": "Optional explicit control piggyback; exact payloads use the full MCP schema and canonical standalone-tool contracts."
+    });
 }
 
 fn compact_discovery_validation_annotations(schema: &mut Value) {

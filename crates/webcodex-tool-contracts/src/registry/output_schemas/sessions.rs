@@ -252,11 +252,11 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
         "validation_summary" => Some(validation_summary_tool_output_schema()),
         "present_work_result" | "work_result_state" => Some(wrapped_output_schema(vec![(
             "work_result",
-            open_object_schema("Bounded Work Result for one exact project-scoped Workflow Session. Initial presentation may include frozen final_changes; explicit state reads return only live workspace, validation, and review domains."),
+            open_object_schema("Bounded Work Result for one exact project-scoped Workflow Session. Presentation and explicit App state reads expose live workspace, validation, review, and Session activity; after a non-blocking current-attempt finish_coding_task closeout they may also expose the retained sealed final_changes snapshot."),
         )])),
         "changes_file_diff" => Some(wrapped_output_schema(vec![(
             "changes_file_diff",
-            open_object_schema("Bounded lazy unified diff for one advertised path in the initial Work Result frozen snapshot."),
+            open_object_schema("Bounded lazy unified diff for one advertised path in the Work Result sealed final snapshot."),
         )])),
         "post_session_message" => Some(wrapped_output_schema(vec![
             ("success", schema_type("boolean", "Always true on success.")),
@@ -266,9 +266,11 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ),
             (
                 "message_id",
-                schema_type("string", "Created wc_msg_* message id."),
+                schema_type("string", "Created or replayed wc_msg_* message id."),
             ),
             ("message", open_object_schema("Created session message.")),
+            ("replayed", schema_type("boolean", "True for an exact delivery_key retry that returned the original message.")),
+            ("state_changed", schema_type("boolean", "True only when this call created the message.")),
         ])),
         "post_peer_message" => Some(wrapped_output_schema(vec![
             ("success", schema_type("boolean", "Always true on success.")),
@@ -276,6 +278,8 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ("sender_peer_id", schema_type("string", "Principal-scoped sender window identity.")),
             ("recipient_peer_id", schema_type("string", "Principal-scoped recipient window identity.")),
             ("requires_ack", schema_type("boolean", "Whether omission of the request-scoped ACK causes re-projection.")),
+            ("replayed", schema_type("boolean", "True for an exact delivery_key retry that returned the original message.")),
+            ("state_changed", schema_type("boolean", "True only when this call created the message.")),
         ])),
         "list_session_messages" => Some(wrapped_output_schema(vec![
             ("success", schema_type("boolean", "Always true on success.")),
@@ -441,9 +445,9 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ),
             (
                 "workspace_clean",
-                schema_type(
+                nullable_schema(
                     "boolean",
-                    "Diagnostic workspace cleanliness verdict.",
+                    "Diagnostic workspace cleanliness verdict; null means Git cleanliness is not applicable or unavailable.",
                 ),
             ),
             (

@@ -4,6 +4,8 @@
 
 Desktop 负责准备本机项目和管理连接；你在 ChatGPT 等 AI 客户端中发起工作。首次安装、Tunnel 配置和系统权限请看[安装与连接指南](desktop-install.zh-CN.md)。
 
+贡献者如果要做 frontend/Tauri 开发、从源码加载 runtime、构建 NSIS/DMG 或运行原生安装 smoke，请看 [Desktop 开发与打包](DESKTOP_DEVELOPMENT.zh-CN.md)。
+
 ## 第一次使用
 
 1. 在欢迎页选择 **在此电脑使用 WebCodex**。这是普通个人使用的推荐入口。
@@ -65,6 +67,8 @@ Desktop 负责准备本机项目和管理连接；你在 ChatGPT 等 AI 客户�
 Desktop 的授权结果不等于独立 Runner 已获授权。Computer Use 实际在 Runner 中执行，应为 macOS 显示的实际进程授权，并按系统提示重启。未观测到的 Runner 授权状态不会被显示为已授权。Windows 不显示 macOS 专属权限按钮。
 
 ## 活动、设置和后台运行
+
+本机 Server 在启动期间退出时，可展开错误提示中的 **详情**。Desktop 会显示可用的退出码；识别到 HTTP 监听绑定失败时，还会显示监听地址和系统错误码，例如 `127.0.0.1:54611` 和 `os error 10013`。诊断从有大小上限的进程输出中提取，不展示任意原始日志，也不改变端口选择或恢复行为。
 
 **活动** 按最新在前显示操作记录。可搜索内容或来源，也可选择 **只看警告和错误**；筛选不会删除记录。
 

@@ -7,10 +7,12 @@
 
 use super::reconnect::dispatch_coding_call_in_window;
 use super::support::*;
+use crate::db::{NewGoal, NewGoalStep};
 use crate::lsp_bridge::{RunnerLspRequest, RunnerLspResultEnvelope, AGENT_LSP_REQUEST_KIND};
 use crate::runner_protocol::{RunnerCapabilities, RunnerResultPayload, RunnerResultRequest};
 use crate::tool_runtime::kernel::{
-    HostFileImportTrust, ToolCallContext, ToolCallRequest, ToolTransport,
+    HostFileImportTrust, ToolCallContext, ToolCallRequest, ToolInvocationMetadata,
+    ToolProtocolCapabilities, ToolTransport,
 };
 use crate::tool_runtime::permissions::{AuthorityMode, PermissionEvaluator};
 use crate::tool_runtime::sessions::{SessionEvent, SessionGuards};
@@ -132,6 +134,32 @@ async fn call_hygiene_in_window_with_local_runner_transport(
     window_id: &str,
     transport: ToolTransport,
 ) -> crate::tool_runtime::kernel::ToolCallOutcome {
+    call_hygiene_in_window_with_local_runner_metadata(
+        runtime,
+        client_id,
+        project,
+        recording_session_id,
+        business_session_id,
+        auth,
+        window_id,
+        transport,
+        ToolInvocationMetadata::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn call_hygiene_in_window_with_local_runner_metadata(
+    runtime: &ToolRuntime,
+    client_id: &str,
+    project: &str,
+    recording_session_id: Option<&str>,
+    business_session_id: Option<&str>,
+    auth: &crate::auth::AuthContext,
+    window_id: &str,
+    transport: ToolTransport,
+    invocation_metadata: ToolInvocationMetadata,
+) -> crate::tool_runtime::kernel::ToolCallOutcome {
     let runtime_for_task = runtime.clone();
     let project = project.to_string();
     let recording_session_id = recording_session_id.map(str::to_string);
@@ -145,7 +173,7 @@ async fn call_hygiene_in_window_with_local_runner_transport(
             arguments["session_id"] = json!(session_id);
         }
         runtime_for_task
-            .call_tool_with_context(
+            .call_tool_with_invocation_metadata(
                 ToolCallRequest {
                     tool_name: "workspace_hygiene_check".to_string(),
                     arguments,
@@ -158,6 +186,8 @@ async fn call_hygiene_in_window_with_local_runner_transport(
                     record_oauth_scope_denials: true,
                     host_file_import_trust: HostFileImportTrust::Untrusted,
                 },
+                invocation_metadata,
+                ToolProtocolCapabilities::default(),
             )
             .await
     });
@@ -942,6 +972,10 @@ fn valid_work_on_project_projection_input() -> serde_json::Value {
         },
         "workspace": {
             "status": "clean",
+            "git": {
+                "status": "clean",
+                "reason_code": null,
+            },
             "git_available": true,
             "branch": "main",
             "head": "0123456789abcdef0123456789abcdef01234567",
@@ -1685,6 +1719,27 @@ fn work_on_project_projection_fails_closed_for_wrong_field_type() {
 }
 
 #[test]
+fn work_on_project_projection_keeps_safe_coding_agent_discovery_and_rejects_private_fields() {
+    let mut input = valid_work_on_project_projection_input();
+    input["coding_agent_providers"] = json!([{"provider_id":"pi", "name":"Pi Agent"}]);
+    let result = crate::tool_runtime::coding_task::project_work_on_project_output(
+        SAMPLE_PROJECT.to_string(),
+        input.clone(),
+    );
+    assert!(result.success);
+    assert_eq!(
+        result.output["coding_agent_providers"],
+        input["coding_agent_providers"]
+    );
+    input["coding_agent_providers"][0]["provider_instance_id"] = json!("private");
+    let result = crate::tool_runtime::coding_task::project_work_on_project_output(
+        SAMPLE_PROJECT.to_string(),
+        input,
+    );
+    assert!(!result.success);
+}
+
+#[test]
 fn work_on_project_projection_fails_closed_for_noncanonical_workflow() {
     let mut output = valid_work_on_project_projection_input();
     output["workflow"]["version"] =
@@ -1752,6 +1807,8 @@ fn work_on_project_projection_is_sparse_for_defaults_and_keeps_noteworthy_state(
         );
     }
     assert_eq!(default_result.output["workspace"]["status"], "clean");
+    assert_eq!(default_result.output["workspace"]["git"]["status"], "clean");
+    assert!(default_result.output["workspace"]["git"]["reason_code"].is_null());
     assert!(default_result.output["workspace"]["branch"].is_string());
     assert!(default_result.output["workspace"]["head"].is_string());
     for omitted in ["git_available", "clean", "conflicts"] {
@@ -2050,6 +2107,7 @@ async fn same_window_recorder_gap_is_visible_without_backfilling_session_ledger(
     .await;
     assert!(recorded.success, "{:?}", recorded.error_status);
     assert!(recorded.correlation.recorder_gap_session_id.is_none());
+    assert!(recorded.correlation.business_session_id.is_none());
     assert!(recorded.correlation.workflow_sessions.iter().any(|link| {
         link.session_id == session_id
             && link.relation == crate::tool_runtime::WorkflowSessionCorrelationRelation::Recording
@@ -2073,6 +2131,20 @@ async fn same_window_recorder_gap_is_visible_without_backfilling_session_ledger(
         .unwrap()
         .events
         .len();
+    let guidance = runtime
+        .sessions
+        .post_message_with_ack(
+            crate::tool_runtime::sessions::PostSessionMessageInput {
+                session_id: session_id.clone(),
+                kind: crate::tool_runtime::sessions::SessionMessageKind::Guidance,
+                message: "same-window attention without recorder".to_string(),
+                tags: Vec::new(),
+                reply_to: None,
+                priority: crate::tool_runtime::sessions::SessionMessagePriority::High,
+            },
+            true,
+        )
+        .unwrap();
 
     // T3: omitting recording_session_id does not block business execution and
     // does not forge a Session event. The exact same Window/principal/Project
@@ -2082,6 +2154,7 @@ async fn same_window_recorder_gap_is_visible_without_backfilling_session_ledger(
     )
     .await;
     assert!(unrecorded.success, "{:?}", unrecorded.error_status);
+    assert!(unrecorded.correlation.business_session_id.is_none());
     assert_eq!(
         unrecorded.correlation.recorder_gap_session_id.as_deref(),
         Some(session_id.as_str())
@@ -2100,6 +2173,22 @@ async fn same_window_recorder_gap_is_visible_without_backfilling_session_ledger(
         project
     );
     assert_eq!(
+        unrecorded_result.output["session_attention"]["session_id"],
+        session_id
+    );
+    assert_eq!(
+        unrecorded_result.output["session_attention"]["source"],
+        "window_affinity"
+    );
+    assert_eq!(
+        unrecorded_result.output["session_attention"]["messages"][0]["message_id"],
+        guidance.message_id
+    );
+    assert_eq!(
+        unrecorded_result.output["session_attention"]["messages"][0]["message"],
+        "same-window attention without recorder"
+    );
+    assert_eq!(
         runtime
             .sessions
             .summary(&session_id, Some(200))
@@ -2108,6 +2197,68 @@ async fn same_window_recorder_gap_is_visible_without_backfilling_session_ledger(
             .len(),
         recorded_event_count,
         "missing recorder must not backfill or mutate the Workflow Session ledger"
+    );
+
+    let acknowledged = call_hygiene_in_window_with_local_runner_metadata(
+        &runtime,
+        "wop-gap",
+        &project,
+        None,
+        None,
+        &auth,
+        window_id,
+        ToolTransport::Mcp,
+        ToolInvocationMetadata {
+            ack_session_message_ids: vec![guidance.message_id.clone()],
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(acknowledged.success, "{:?}", acknowledged.error_status);
+    let acknowledged = acknowledged.result.unwrap();
+    assert_eq!(
+        acknowledged.output["session_attention"]["session_id"],
+        session_id
+    );
+    assert_eq!(
+        acknowledged.output["session_attention"]["ack"]["accepted_count"],
+        1
+    );
+    assert!(acknowledged.output["session_attention"]["messages"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(runtime
+        .sessions
+        .list_messages(
+            &session_id,
+            crate::tool_runtime::sessions::ListSessionMessagesFilter {
+                message_id: Some(guidance.message_id.clone()),
+                ..Default::default()
+            }
+        )
+        .unwrap()[0]
+        .first_ack_observed_at
+        .is_some());
+    assert_eq!(
+        runtime
+            .sessions
+            .summary(&session_id, Some(200))
+            .unwrap()
+            .events
+            .len(),
+        recorded_event_count,
+        "fallback ACK must not create a recorder ToolCall event"
+    );
+
+    let forgotten = call_hygiene_in_window_with_local_runner(
+        &runtime, "wop-gap", &project, None, None, &auth, window_id,
+    )
+    .await;
+    assert_eq!(
+        forgotten.result.unwrap().output["session_attention"]["messages"][0]["message_id"],
+        guidance.message_id,
+        "historical first ACK observation is not durable resolution"
     );
 
     // The recorder gap remains auditable, but an exact business Session equal to
@@ -2130,6 +2281,10 @@ async fn same_window_recorder_gap_is_visible_without_backfilling_session_ledger(
             .correlation
             .recorder_gap_session_id
             .as_deref(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(
+        business_bound.correlation.business_session_id.as_deref(),
         Some(session_id.as_str())
     );
     assert!(business_bound
@@ -2175,6 +2330,13 @@ async fn same_window_recorder_gap_is_visible_without_backfilling_session_ledger(
             .recorder_gap_session_id
             .as_deref(),
         Some(session_id.as_str())
+    );
+    assert_eq!(
+        different_business
+            .correlation
+            .business_session_id
+            .as_deref(),
+        Some(different_session.session_id.as_str())
     );
     assert_eq!(
         different_business
@@ -2265,6 +2427,252 @@ async fn same_window_recorder_gap_is_visible_without_backfilling_session_ledger(
         .unwrap();
     assert_eq!(affinity.workflow_session_id, session_id);
     assert_eq!(affinity.relation, "recording");
+}
+
+#[tokio::test]
+async fn window_affinity_attention_is_strict_and_explicit_recorder_keeps_precedence() {
+    let root = tempfile::tempdir().unwrap();
+    let audit_root = tempfile::tempdir().unwrap();
+    init_git_repo(root.path());
+    let window_db = std::sync::Arc::new(
+        crate::Database::open(&audit_root.path().join("attention-strict.db")).unwrap(),
+    );
+    let runtime = ToolRuntime::new_for_tests().with_window_activity_database(window_db.clone());
+    let project =
+        register_runner_project_at_path(&runtime, "attention-strict", "demo", root.path()).await;
+    let auth = auth_context(None, true);
+    let window_id = "attention-strict-window";
+    let affinity = runtime
+        .sessions
+        .start_session(Some(project.clone()), Some("affinity target".to_string()));
+    let affinity_message = runtime
+        .sessions
+        .post_message_with_ack(
+            crate::tool_runtime::sessions::PostSessionMessageInput {
+                session_id: affinity.session_id.clone(),
+                kind: crate::tool_runtime::sessions::SessionMessageKind::Guidance,
+                message: "affinity-only guidance".to_string(),
+                tags: Vec::new(),
+                reply_to: None,
+                priority: crate::tool_runtime::sessions::SessionMessagePriority::High,
+            },
+            true,
+        )
+        .unwrap();
+    record_window_activity_fixture(
+        &window_db,
+        &auth,
+        window_id,
+        &project,
+        "work_on_project",
+        Some((
+            &affinity.session_id,
+            crate::action_audit_sessions::WorkflowSessionRelation::WorkOnProject,
+        )),
+        None,
+        1_000,
+    );
+
+    let wrong_window = call_hygiene_in_window_with_local_runner(
+        &runtime,
+        "attention-strict",
+        &project,
+        None,
+        None,
+        &auth,
+        "attention-strict-other-window",
+    )
+    .await;
+    assert!(wrong_window.success);
+    assert!(wrong_window
+        .result
+        .unwrap()
+        .output
+        .get("session_attention")
+        .is_none());
+
+    let other_principal = auth_context(Some("different-principal"), true);
+    let wrong_principal = call_hygiene_in_window_with_local_runner(
+        &runtime,
+        "attention-strict",
+        &project,
+        None,
+        None,
+        &other_principal,
+        window_id,
+    )
+    .await;
+    assert!(wrong_principal.success);
+    assert!(wrong_principal
+        .result
+        .unwrap()
+        .output
+        .get("session_attention")
+        .is_none());
+
+    let wrong_project_window = "attention-strict-wrong-project";
+    let unrelated_project = "agent:other:unregistered-project";
+    let unrelated = runtime.sessions.start_session(
+        Some(unrelated_project.to_string()),
+        Some("wrong project".to_string()),
+    );
+    record_window_activity_fixture(
+        &window_db,
+        &auth,
+        wrong_project_window,
+        unrelated_project,
+        "work_on_project",
+        Some((
+            &unrelated.session_id,
+            crate::action_audit_sessions::WorkflowSessionRelation::WorkOnProject,
+        )),
+        None,
+        2_000,
+    );
+    let wrong_project = call_hygiene_in_window_with_local_runner(
+        &runtime,
+        "attention-strict",
+        &project,
+        None,
+        None,
+        &auth,
+        wrong_project_window,
+    )
+    .await;
+    assert!(wrong_project.success);
+    assert!(wrong_project
+        .result
+        .unwrap()
+        .output
+        .get("session_attention")
+        .is_none());
+
+    let closed_window = "attention-strict-closed";
+    let closed = runtime
+        .sessions
+        .start_session(Some(project.clone()), Some("closed affinity".to_string()));
+    record_window_activity_fixture(
+        &window_db,
+        &auth,
+        closed_window,
+        &project,
+        "work_on_project",
+        Some((
+            &closed.session_id,
+            crate::action_audit_sessions::WorkflowSessionRelation::WorkOnProject,
+        )),
+        None,
+        3_000,
+    );
+    runtime.sessions.close_session(&closed.session_id).unwrap();
+    let inactive = call_hygiene_in_window_with_local_runner(
+        &runtime,
+        "attention-strict",
+        &project,
+        None,
+        None,
+        &auth,
+        closed_window,
+    )
+    .await;
+    assert!(inactive.success);
+    assert!(inactive
+        .result
+        .unwrap()
+        .output
+        .get("session_attention")
+        .is_none());
+
+    let recorder = runtime
+        .sessions
+        .start_session(Some(project.clone()), Some("explicit recorder".to_string()));
+    let recorder_message = runtime
+        .sessions
+        .post_message_with_ack(
+            crate::tool_runtime::sessions::PostSessionMessageInput {
+                session_id: recorder.session_id.clone(),
+                kind: crate::tool_runtime::sessions::SessionMessageKind::Guidance,
+                message: "explicit recorder guidance".to_string(),
+                tags: Vec::new(),
+                reply_to: None,
+                priority: crate::tool_runtime::sessions::SessionMessagePriority::Normal,
+            },
+            true,
+        )
+        .unwrap();
+    let explicit = call_hygiene_in_window_with_local_runner(
+        &runtime,
+        "attention-strict",
+        &project,
+        Some(&recorder.session_id),
+        None,
+        &auth,
+        window_id,
+    )
+    .await;
+    assert!(explicit.success);
+    let explicit_output = &explicit.result.as_ref().unwrap().output;
+    assert_eq!(
+        explicit_output["session_attention"]["session_id"],
+        recorder.session_id
+    );
+    assert_eq!(
+        explicit_output["session_attention"]["source"],
+        "recording_session"
+    );
+    assert_eq!(
+        explicit_output["session_attention"]["messages"][0]["message_id"],
+        recorder_message.message_id
+    );
+    assert_ne!(
+        explicit_output["session_attention"]["messages"][0]["message_id"],
+        affinity_message.message_id
+    );
+
+    let resolution_without_recorder = call_hygiene_in_window_with_local_runner_metadata(
+        &runtime,
+        "attention-strict",
+        &project,
+        None,
+        None,
+        &auth,
+        window_id,
+        ToolTransport::Mcp,
+        ToolInvocationMetadata {
+            session_message_resolution: Some(
+                crate::tool_runtime::sessions::ToolCallSessionMessageResolution {
+                    message_id: affinity_message.message_id.clone(),
+                    resolution: "must stay explicit".to_string(),
+                },
+            ),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        resolution_without_recorder.error_status,
+        Some(
+            crate::tool_runtime::kernel::ToolCallErrorStatus::InvalidArguments {
+                message: "session_message_resolution requires recording_session_id".to_string(),
+            }
+        )
+    );
+    assert!(resolution_without_recorder.result.is_none());
+    let retained = runtime
+        .sessions
+        .list_messages(
+            &affinity.session_id,
+            crate::tool_runtime::sessions::ListSessionMessagesFilter {
+                message_id: Some(affinity_message.message_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        retained[0].status,
+        crate::tool_runtime::sessions::SessionMessageStatus::Open
+    );
+    assert!(retained[0].resolution.is_none());
 }
 
 #[tokio::test]
@@ -3369,8 +3777,12 @@ async fn path_source_respects_restricted_authority_before_runner_enqueue() {
 #[tokio::test]
 async fn work_on_project_continues_exact_session_and_appends_instruction() {
     let root = tempfile::tempdir().unwrap();
+    let goal_store = tempfile::tempdir().unwrap();
     init_git_repo(root.path());
-    let runtime = ToolRuntime::new_for_tests();
+    let goal_db = std::sync::Arc::new(
+        crate::db::Database::open(&goal_store.path().join("goals.db")).unwrap(),
+    );
+    let runtime = ToolRuntime::new_for_tests().with_communication_database(goal_db);
     let project =
         register_runner_project_at_path(&runtime, "wop-continue", "demo", root.path()).await;
     let auth = auth_context(None, true);
@@ -3385,8 +3797,59 @@ async fn work_on_project_continues_exact_session_and_appends_instruction() {
     .await;
     assert!(first.success, "{:?}", first.error);
     let session_id = first.output["session_id"].as_str().unwrap().to_string();
+    assert!(
+        first.output.get("goal_context").is_none(),
+        "fresh Session must not fabricate active Goal context"
+    );
     let before = instruction_events(&runtime, &session_id);
     assert_eq!(before.len(), 1);
+
+    let created = runtime.create_goal_with_plan(
+        Some(&auth),
+        NewGoal {
+            title: "Continue exact Goal".into(),
+            objective: "Reuse this Goal on normal Workflow Session re-entry.".into(),
+            controller_agent_id: None,
+            completion_conditions: vec!["Normal re-entry reuses exact Goal identity".into()],
+            steps: vec![
+                NewGoalStep {
+                    id: "inspect".into(),
+                    title: "Inspect".into(),
+                },
+                NewGoalStep {
+                    id: "verify".into(),
+                    title: "Verify".into(),
+                },
+            ],
+            idempotency_key: "wop-goal-create".into(),
+        },
+    );
+    assert!(created.success, "{:?}", created.output);
+    let goal_id = created.output["goal"]["summary"]["goal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let associated = runtime
+        .associate_goal_workflow_session(
+            Some(&auth),
+            goal_id.clone(),
+            session_id.clone(),
+            "wop-goal-link".into(),
+        )
+        .await;
+    assert!(associated.success, "{:?}", associated.output);
+    let checkpoint = runtime.checkpoint_goal(
+        Some(&auth),
+        goal_id.clone(),
+        2,
+        crate::db::GoalCheckpoint {
+            completed_step_ids: vec!["inspect".into()],
+            current_step_id: Some("verify".into()),
+            summary: "Inspect complete; verify next.".into(),
+        },
+        "wop-goal-checkpoint".into(),
+    );
+    assert!(checkpoint.success, "{:?}", checkpoint.output);
 
     let continued = dispatch_coding_call_in_window(
         &runtime,
@@ -3399,8 +3862,72 @@ async fn work_on_project_continues_exact_session_and_appends_instruction() {
     assert!(continued.success, "{:?}", continued.error);
     assert_eq!(continued.output["session_id"], session_id);
     assert_eq!(continued.output["continuation"], "resumed_explicitly");
+    assert_eq!(continued.output["goal_context"]["available"], true);
+    assert_eq!(continued.output["goal_context"]["truncated"], false);
+    assert_eq!(
+        continued.output["goal_context"]["goals"],
+        json!([{
+            "goal_id": goal_id,
+            "revision": 3,
+            "incomplete_step_count": 1,
+            "current_step": {"id": "verify", "title": "Verify"},
+            "next_action": "checkpoint_goal"
+        }])
+    );
     assert!(first.output.get("workflow").is_none());
     assert!(continued.output.get("workflow").is_none());
+
+    let second = runtime.create_goal(
+        Some(&auth),
+        "Second active Goal".into(),
+        "Remain explicit when multiple active Goals share one Session.".into(),
+        "wop-second-goal-create".into(),
+    );
+    assert!(second.success, "{:?}", second.output);
+    let second_goal_id = second.output["goal"]["summary"]["goal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let second_link = runtime
+        .associate_goal_workflow_session(
+            Some(&auth),
+            second_goal_id.clone(),
+            session_id.clone(),
+            "wop-second-goal-link".into(),
+        )
+        .await;
+    assert!(second_link.success, "{:?}", second_link.output);
+    let continued_with_multiple = dispatch_coding_call_in_window(
+        &runtime,
+        "wop-continue",
+        work_on_project_call(&project, "choose explicit active Goal", Some(&session_id)),
+        Some(&auth),
+        "wop-continue-window",
+    )
+    .await;
+    assert!(
+        continued_with_multiple.success,
+        "{:?}",
+        continued_with_multiple.error
+    );
+    let goals = continued_with_multiple.output["goal_context"]["goals"]
+        .as_array()
+        .unwrap();
+    assert_eq!(goals.len(), 2);
+    let mut returned_ids = goals
+        .iter()
+        .map(|goal| goal["goal_id"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    returned_ids.sort();
+    let mut expected_ids = vec![goal_id, second_goal_id];
+    expected_ids.sort();
+    assert_eq!(returned_ids, expected_ids);
+    assert!(
+        continued_with_multiple.output["goal_context"]
+            .get("selected_goal_id")
+            .is_none(),
+        "startup Goal context must never auto-select among active Goals"
+    );
 
     // Explicit resume reuses exactly one Session and appends one instruction.
     assert_eq!(
@@ -3412,11 +3939,15 @@ async fn work_on_project_continues_exact_session_and_appends_instruction() {
 
     // Follow-up instruction appended; root title preserved.
     let events = instruction_events(&runtime, &session_id);
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
     assert_eq!(events[0].instruction.as_deref(), Some("root objective"));
     assert_eq!(
         events[1].instruction.as_deref(),
         Some("follow-up instruction")
+    );
+    assert_eq!(
+        events[2].instruction.as_deref(),
+        Some("choose explicit active Goal")
     );
     let summary = runtime.sessions.summary(&session_id, Some(50)).unwrap();
     assert_eq!(summary.title.as_deref(), Some("root objective"));
@@ -3428,6 +3959,47 @@ async fn work_on_project_continues_exact_session_and_appends_instruction() {
             .unwrap()
             .contains("webcodex.coding_workflow"),
         "workflow projection must not become Session state"
+    );
+}
+
+#[tokio::test]
+async fn work_on_project_exact_resume_omits_goal_context_without_active_goal() {
+    let root = tempfile::tempdir().unwrap();
+    let goal_store = tempfile::tempdir().unwrap();
+    init_git_repo(root.path());
+    let goal_db = std::sync::Arc::new(
+        crate::db::Database::open(&goal_store.path().join("goals.db")).unwrap(),
+    );
+    let runtime = ToolRuntime::new_for_tests().with_communication_database(goal_db);
+    let project =
+        register_runner_project_at_path(&runtime, "wop-no-goal", "demo", root.path()).await;
+    let auth = auth_context(None, true);
+
+    let first = dispatch_coding_call_in_window(
+        &runtime,
+        "wop-no-goal",
+        work_on_project_call(&project, "root objective", None),
+        Some(&auth),
+        "wop-no-goal-window",
+    )
+    .await;
+    assert!(first.success, "{:?}", first.error);
+    let session_id = first.output["session_id"].as_str().unwrap().to_string();
+
+    let resumed = dispatch_coding_call_in_window(
+        &runtime,
+        "wop-no-goal",
+        work_on_project_call(&project, "ordinary continuation", Some(&session_id)),
+        Some(&auth),
+        "wop-no-goal-window",
+    )
+    .await;
+    assert!(resumed.success, "{:?}", resumed.error);
+    assert_eq!(resumed.output["session_id"], session_id);
+    assert_eq!(resumed.output["continuation"], "resumed_explicitly");
+    assert!(
+        resumed.output.get("goal_context").is_none(),
+        "exact Session re-entry with zero active Goals must keep startup sparse"
     );
 }
 
@@ -4031,6 +4603,76 @@ async fn work_on_project_omits_instruction_bodies_even_for_a_fresh_session() {
         Some(stored_agents.fingerprint.as_str()),
         agents_source["fingerprint"].as_str()
     );
+}
+
+#[tokio::test]
+async fn work_on_project_fresh_window_discovers_only_owning_runner_acp_and_admits_it() {
+    let root = tempfile::tempdir().unwrap();
+    seed_coding_repository(root.path(), "Review source without changing files");
+    let runtime = ToolRuntime::new_for_tests();
+    let provider = |id: &str, name: &str| webcodex_core::coding_agent::CodingAgentProvider {
+        provider_id: id.to_owned(),
+        name: name.to_owned(),
+        provider_instance_id: format!("private-provider-{id}"),
+    };
+    let project = register_runner_project_at_path_with_coding_agents(
+        &runtime,
+        "wop-acp",
+        "demo",
+        root.path(),
+        Some(vec![provider("pi", "Pi Agent")]),
+    )
+    .await;
+    register_runner_project_at_path_with_coding_agents(
+        &runtime,
+        "other-acp",
+        "other",
+        root.path(),
+        Some(vec![provider("codex", "Codex Agent")]),
+    )
+    .await;
+    let auth = auth_context(None, true);
+    for window in ["fresh-acp-window-a", "fresh-acp-window-b"] {
+        let result = dispatch_coding_call_in_window(
+            &runtime,
+            "wop-acp",
+            work_on_project_call(
+                &project,
+                "Review the repository without changing files",
+                None,
+            ),
+            Some(&auth),
+            window,
+        )
+        .await;
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            result.output["coding_agent_providers"],
+            json!([{"provider_id":"pi","name":"Pi Agent"}])
+        );
+        assert!(!result.output.to_string().contains("private-provider-"));
+        let advertised = result.output["coding_agent_providers"][0]["provider_id"]
+            .as_str()
+            .unwrap();
+        assert!(runtime
+            .prepare_coding_agent_start(
+                project.clone(),
+                advertised.to_owned(),
+                format!("discover-{window}"),
+                "Read-only module review".to_owned(),
+                None,
+                Some(10),
+                Some(&auth),
+            )
+            .await
+            .is_ok());
+        let schema = crate::tool_runtime::registry::output_schema_for_tool("work_on_project");
+        crate::tool_runtime::startup_brief::validate_schema_instance_for_test(
+            &json!({"success": true, "output": result.output}),
+            &schema,
+        )
+        .unwrap();
+    }
 }
 
 #[tokio::test]
