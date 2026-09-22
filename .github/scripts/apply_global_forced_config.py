@@ -248,6 +248,17 @@ rep(p,
 '''    fn force_luna_max(cfg: &mut AcpConfig) {
         cfg.forced_config = BTreeMap::from([''')
 
+rep(p,
+'''        AcpConfig {
+            max_concurrent_runs: 1,
+            permission_timeout_secs: 1,
+            agents: vec![AcpAgentConfig {''',
+'''        AcpConfig {
+            max_concurrent_runs: 1,
+            permission_timeout_secs: 1,
+            forced_config: BTreeMap::new(),
+            agents: vec![AcpAgentConfig {''')
+
 text = read(p)
 text = text.replace(
 '''        let cfg = AcpConfig {
