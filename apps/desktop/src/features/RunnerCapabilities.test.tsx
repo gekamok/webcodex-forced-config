@@ -18,7 +18,7 @@ vi.mock("./workspace/WorkspaceContext", () => ({ workspaceQuery: query }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 const target = { config_path: "/fixture/runner.toml", client_id: "fixture", server_url: "http://127.0.0.1:62645" };
 const settings: RunnerSettings = { target, paths: { instruction_files: [], skill_roots: [] }, plugin_ids: [], can_restart: true };
-const profile: CodingAgentProfile = { provider_id: "pi", name: "Pi Agent", executable: "/fixture/pi-acp", args: ["--acp"], enabled: true, env_from_env: {}, allowed_config_options: [] };
+const profile: CodingAgentProfile = { provider_id: "pi", name: "Pi Agent", executable: "/fixture/pi-acp", args: ["--acp"], enabled: true, env_from_env: {}, allowed_config_options: [], forced_config: { model: "gpt-6-luna", reasoning_effort: "max" } };
 function state(): DesktopState {
   return {
     topology: { experience: "full", server: { kind: "local" }, runner: { kind: "local" }, exposure: { kind: "none" }, enrollment: { kind: "managed_pairing" } },

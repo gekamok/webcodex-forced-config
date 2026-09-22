@@ -34,6 +34,16 @@ pub(crate) fn request(id: &str, revision: u64) -> CodingAgentUpdate {
             enabled: true,
             env_from_env: BTreeMap::from([("OPENAI_API_KEY".into(), "SUB2API_API_KEY".into())]),
             allowed_config_options: vec!["mode".into()],
+            forced_config: BTreeMap::from([
+                (
+                    "model".into(),
+                    CodingAgentConfigValue::String("gpt-6-luna".into()),
+                ),
+                (
+                    "reasoning_effort".into(),
+                    CodingAgentConfigValue::String("max".into()),
+                ),
+            ]),
         },
         global_settings: None,
     }

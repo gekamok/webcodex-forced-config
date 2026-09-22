@@ -5,7 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use webcodex_core::coding_agent::{validate_provider_id, CODING_AGENT_MAX_PROVIDERS};
+use webcodex_core::coding_agent::{
+    validate_provider_id, CodingAgentConfigValue, CODING_AGENT_MAX_CONFIG_KEY_BYTES,
+    CODING_AGENT_MAX_CONFIG_OPTIONS, CODING_AGENT_MAX_CONFIG_VALUE_BYTES,
+    CODING_AGENT_MAX_PROVIDERS,
+};
 
 const MAX_BYTES: u64 = 1024 * 1024;
 const MAX_SAVED: usize = 64;
@@ -24,6 +28,8 @@ pub struct CodingAgentProfile {
     pub env_from_env: BTreeMap<String, String>,
     #[serde(default)]
     pub allowed_config_options: Vec<String>,
+    #[serde(default)]
+    pub forced_config: BTreeMap<String, CodingAgentConfigValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -294,6 +300,7 @@ fn validate_profile(profile: &CodingAgentProfile) -> DesktopResult<()> {
         || profile.args.iter().map(|a| a.len() + 1).sum::<usize>() > 16 * 1024
         || profile.env_from_env.len() > 64
         || profile.allowed_config_options.len() > 64
+        || profile.forced_config.len() > CODING_AGENT_MAX_CONFIG_OPTIONS
     {
         return Err(invalid());
     }
@@ -323,9 +330,20 @@ fn validate_profile(profile: &CodingAgentProfile) -> DesktopResult<()> {
     let mut options = BTreeSet::new();
     for option in &profile.allowed_config_options {
         if option.is_empty()
-            || option.len() > 128
+            || option.len() > CODING_AGENT_MAX_CONFIG_KEY_BYTES
             || option.chars().any(char::is_control)
             || !options.insert(option)
+        {
+            return Err(invalid());
+        }
+    }
+    for (key, value) in &profile.forced_config {
+        if key.is_empty()
+            || key.len() > CODING_AGENT_MAX_CONFIG_KEY_BYTES
+            || key.chars().any(char::is_control)
+            || value.serialized_len() > CODING_AGENT_MAX_CONFIG_VALUE_BYTES
+            || matches!(value, CodingAgentConfigValue::Integer(_))
+            || options.contains(key)
         {
             return Err(invalid());
         }
