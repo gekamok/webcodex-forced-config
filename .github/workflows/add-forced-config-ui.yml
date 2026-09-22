@@ -182,12 +182,12 @@ jobs:
           replace(
               "apps/desktop/src/models/runner-capabilities.ts",
               '''  env_from_env: Record<string, string>;
-              allowed_config_options: string[];
-          }''',
+  allowed_config_options: string[];
+}''',
               '''  env_from_env: Record<string, string>;
-              allowed_config_options: string[];
-              forced_config: Record<string, string | boolean>;
-          }'''
+  allowed_config_options: string[];
+  forced_config: Record<string, string | boolean>;
+}'''
           )
 
           replace(
@@ -257,11 +257,6 @@ jobs:
               '''const profile: CodingAgentProfile = { provider_id: "pi", name: "Pi Agent", executable: "/fixture/pi-acp", args: ["--acp"], enabled: true, env_from_env: {}, allowed_config_options: [], forced_config: { model: "gpt-6-luna", reasoning_effort: "max" } };'''
           )
 
-          replace(
-              ".github/workflows/desktop-build.yml",
-              '''$installer = Join-Path $dist "webcodex-desktop-${{ steps.runtime.outputs.short }}-v${{ steps.runtime.outputs.version }}-win32-x64-setup.exe"''',
-              '''$installer = Join-Path $dist "webcodex-desktop-${{ steps.runtime.outputs.short }}-v${{ steps.runtime.outputs.version }}-gpt6-luna-max-win32-x64-setup.exe"'''
-          )
           PY
 
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
@@ -292,6 +287,6 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add             apps/desktop/src-tauri/src/coding_agents.rs             apps/desktop/src-tauri/src/coding_agents/tests.rs             apps/desktop/src-tauri/src/webcodex/settings/acp.rs             apps/desktop/src/models/runner-capabilities.ts             apps/desktop/src/features/extensions/CodingAgentEditor.tsx             apps/desktop/src/i18n/runner-capabilities.ts             apps/desktop/src/features/RunnerCapabilities.test.tsx             .github/workflows/desktop-build.yml
+          git add             apps/desktop/src-tauri/src/coding_agents.rs             apps/desktop/src-tauri/src/coding_agents/tests.rs             apps/desktop/src-tauri/src/webcodex/settings/acp.rs             apps/desktop/src/models/runner-capabilities.ts             apps/desktop/src/features/extensions/CodingAgentEditor.tsx             apps/desktop/src/i18n/runner-capabilities.ts             apps/desktop/src/features/RunnerCapabilities.test.tsx
           git commit -m "feat(desktop): manage forced ACP model and effort [release-now]"
           git push origin HEAD:main
