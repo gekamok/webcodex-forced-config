@@ -1,0 +1,290 @@
+name: Desktop builds
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-x64:
+    name: Windows x64 Desktop
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-windows-x64
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Desktop dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Build exact WebCodex runtime
+        id: runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = (git rev-parse HEAD).Trim()
+          $short = (git rev-parse --short=12 HEAD).Trim()
+          $version = (node -e "console.log(require('./npm/webcodex/package.json').version)").Trim()
+          $builtAt = [Int64]((git show -s --format=%ct HEAD).Trim())
+
+          $env:WEBCODEX_BUILT_AT = "$builtAt"
+          cargo build --locked --profile dogfood -p webcodex -p webcodex-cli -p webcodex-runner
+          if ($LASTEXITCODE -ne 0) { throw "WebCodex runtime build failed" }
+
+          foreach ($name in @("webcodex", "webcodex-server", "webcodex-runner")) {
+            $binary = Join-Path "target\dogfood" "$name.exe"
+            $output = @(& $binary --version)
+            if ($LASTEXITCODE -ne 0 -or $output.Count -eq 0) {
+              throw "$name --version failed"
+            }
+            $actual = $output[0].TrimEnd()
+            $expected = "$name $version (commit $short, dirty=false, built_at=$builtAt)"
+            if ($actual -ne $expected) {
+              throw "Unexpected $name identity: $actual"
+            }
+          }
+
+          "source=$source" >> $env:GITHUB_OUTPUT
+          "short=$short" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "built_at=$builtAt" >> $env:GITHUB_OUTPUT
+
+      - name: Stage runtime for Windows Desktop
+        id: bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = Join-Path $env:RUNNER_TEMP "webcodex-desktop-windows-bundle"
+
+          & .\scripts\prepare_desktop_bundle.ps1 `
+            -BinDir "target\dogfood" `
+            -Version "${{ steps.runtime.outputs.version }}" `
+            -SourceSha "${{ steps.runtime.outputs.source }}" `
+            -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") `
+            -OutputDir $stage
+
+          "config=$(Join-Path $stage 'tauri.bundle.conf.json')" >> $env:GITHUB_OUTPUT
+
+      - name: Build Windows installer
+        id: installer
+        working-directory: apps/desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE "target\desktop-windows-tauri"
+
+          npm exec tauri -- build --bundles nsis --config "${{ steps.bundle.outputs.config }}" --ci --no-sign
+          if ($LASTEXITCODE -ne 0) { throw "Tauri NSIS build failed" }
+
+          $bundleDir = Join-Path $env:CARGO_TARGET_DIR "release\bundle\nsis"
+          $built = @(Get-ChildItem -LiteralPath $bundleDir -Filter "*-setup.exe" -File)
+          if ($built.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($built.Count)"
+          }
+
+          $dist = Join-Path $env:GITHUB_WORKSPACE "target\desktop-dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $installer = Join-Path $dist "webcodex-desktop-${{ steps.runtime.outputs.short }}-v${{ steps.runtime.outputs.version }}-win32-x64-setup.exe"
+          Copy-Item -LiteralPath $built[0].FullName -Destination $installer
+
+          "path=$installer" >> $env:GITHUB_OUTPUT
+
+      - name: Smoke Windows installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\scripts\desktop_install_windows_smoke.ps1 `
+            -Installer "${{ steps.installer.outputs.path }}" `
+            -Version "${{ steps.runtime.outputs.version }}" `
+            -SourceSha "${{ steps.runtime.outputs.source }}" `
+            -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") `
+            -Platform win32-x64
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: webcodex-desktop-win32-x64
+          path: ${{ steps.installer.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS Desktop (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-15
+            host_arch: arm64
+            rust_host: aarch64-apple-darwin
+            file_arch: arm64
+          - platform: darwin-x64
+            runner: macos-15-intel
+            host_arch: x86_64
+            rust_host: x86_64-apple-darwin
+            file_arch: x86_64
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-macos-${{ matrix.platform }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Verify native macOS host
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.host_arch }}"
+          rust_host="$(rustc -vV | sed -n 's/^host: //p')"
+          test "$rust_host" = "${{ matrix.rust_host }}"
+
+      - name: Install Desktop dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Build exact WebCodex runtime
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_sha="$(git rev-parse HEAD)"
+          short_source="$(git rev-parse --short=12 HEAD)"
+          version="$(node -p "require('./npm/webcodex/package.json').version")"
+          built_at="$(git show -s --format=%ct HEAD)"
+
+          export WEBCODEX_BUILT_AT="$built_at"
+          cargo build --locked --profile dogfood -p webcodex -p webcodex-cli -p webcodex-runner
+
+          for name in webcodex webcodex-server webcodex-runner; do
+            binary="target/dogfood/$name"
+            actual="$("$binary" --version)"
+            expected="$name $version (commit $short_source, dirty=false, built_at=$built_at)"
+            test "$actual" = "$expected"
+            test "$(/usr/bin/lipo -archs "$binary")" = "${{ matrix.file_arch }}"
+          done
+
+          {
+            echo "source=$source_sha"
+            echo "short=$short_source"
+            echo "version=$version"
+            echo "built_at=$built_at"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Stage runtime for macOS Desktop
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/webcodex-desktop-${{ matrix.platform }}-bundle"
+
+          python3 scripts/prepare_desktop_bundle_macos.py \
+            --bin-dir target/dogfood \
+            --version "${{ steps.runtime.outputs.version }}" \
+            --source-sha "${{ steps.runtime.outputs.source }}" \
+            --built-at "${{ steps.runtime.outputs.built_at }}" \
+            --platform "${{ matrix.platform }}" \
+            --signing-mode adhoc \
+            --output-dir "$stage"
+
+          {
+            echo "config=$stage/tauri.bundle.conf.json"
+            echo "metadata=$stage/desktop-bundle.json"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build macOS DMG
+        id: dmg
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          CI: "true"
+          APPLE_SIGNING_IDENTITY: "-"
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/webcodex-desktop-${{ matrix.platform }}-tauri"
+
+          npm exec tauri -- build \
+            --bundles dmg \
+            --config "${{ steps.bundle.outputs.config }}" \
+            --ci -- --locked
+
+          bundle_dir="$CARGO_TARGET_DIR/release/bundle/dmg"
+          shopt -s nullglob
+          candidates=("$bundle_dir"/*.dmg)
+          test "${#candidates[@]}" -eq 1
+
+          dist="$GITHUB_WORKSPACE/target/desktop-dist"
+          mkdir -p "$dist"
+          dmg="$dist/webcodex-desktop-${{ steps.runtime.outputs.short }}-v${{ steps.runtime.outputs.version }}-${{ matrix.platform }}.dmg"
+          cp "${candidates[0]}" "$dmg"
+
+          echo "path=$dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke macOS DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/desktop_install_macos_smoke.sh \
+            --dmg "${{ steps.dmg.outputs.path }}" \
+            --version "${{ steps.runtime.outputs.version }}" \
+            --source-sha "${{ steps.runtime.outputs.source }}" \
+            --built-at "${{ steps.runtime.outputs.built_at }}" \
+            --platform "${{ matrix.platform }}" \
+            --stage-metadata "${{ steps.bundle.outputs.metadata }}" \
+            --signing-mode adhoc
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: webcodex-desktop-${{ matrix.platform }}
+          path: ${{ steps.dmg.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
