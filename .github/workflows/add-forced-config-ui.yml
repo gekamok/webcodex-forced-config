@@ -1,0 +1,297 @@
+name: Add forced config Desktop UI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/add-forced-config-ui.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Add Desktop forced_config editor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f"expected text not found in {path}: {old[:120]!r}")
+              p.write_text(s.replace(old, new, 1))
+
+          replace(
+              "apps/desktop/src-tauri/src/coding_agents.rs",
+              'use webcodex_core::coding_agent::{validate_provider_id, CODING_AGENT_MAX_PROVIDERS};',
+              '''use webcodex_core::coding_agent::{
+              validate_provider_id, CodingAgentConfigValue, CODING_AGENT_MAX_CONFIG_KEY_BYTES,
+              CODING_AGENT_MAX_CONFIG_OPTIONS, CODING_AGENT_MAX_CONFIG_VALUE_BYTES,
+              CODING_AGENT_MAX_PROVIDERS,
+          };'''
+          )
+
+          replace(
+              "apps/desktop/src-tauri/src/coding_agents.rs",
+              '''    #[serde(default)]
+              pub allowed_config_options: Vec<String>,
+          }''',
+              '''    #[serde(default)]
+              pub allowed_config_options: Vec<String>,
+              #[serde(default)]
+              pub forced_config: BTreeMap<String, CodingAgentConfigValue>,
+          }'''
+          )
+
+          replace(
+              "apps/desktop/src-tauri/src/coding_agents.rs",
+              '''        || profile.env_from_env.len() > 64
+                  || profile.allowed_config_options.len() > 64
+              {''',
+              '''        || profile.env_from_env.len() > 64
+                  || profile.allowed_config_options.len() > 64
+                  || profile.forced_config.len() > CODING_AGENT_MAX_CONFIG_OPTIONS
+              {'''
+          )
+
+          replace(
+              "apps/desktop/src-tauri/src/coding_agents.rs",
+              '''    let mut options = BTreeSet::new();
+              for option in &profile.allowed_config_options {
+                  if option.is_empty()
+                      || option.len() > 128
+                      || option.chars().any(char::is_control)
+                      || !options.insert(option)
+                  {
+                      return Err(invalid());
+                  }
+              }
+              Ok(())
+          }''',
+              '''    let mut options = BTreeSet::new();
+              for option in &profile.allowed_config_options {
+                  if option.is_empty()
+                      || option.len() > CODING_AGENT_MAX_CONFIG_KEY_BYTES
+                      || option.chars().any(char::is_control)
+                      || !options.insert(option)
+                  {
+                      return Err(invalid());
+                  }
+              }
+              for (key, value) in &profile.forced_config {
+                  if key.is_empty()
+                      || key.len() > CODING_AGENT_MAX_CONFIG_KEY_BYTES
+                      || key.chars().any(char::is_control)
+                      || value.serialized_len() > CODING_AGENT_MAX_CONFIG_VALUE_BYTES
+                      || matches!(value, CodingAgentConfigValue::Integer(_))
+                      || options.contains(key)
+                  {
+                      return Err(invalid());
+                  }
+              }
+              Ok(())
+          }'''
+          )
+
+          replace(
+              "apps/desktop/src-tauri/src/coding_agents/tests.rs",
+              '''            env_from_env: BTreeMap::from([("OPENAI_API_KEY".into(), "SUB2API_API_KEY".into())]),
+                      allowed_config_options: vec!["mode".into()],
+                  },''',
+              '''            env_from_env: BTreeMap::from([("OPENAI_API_KEY".into(), "SUB2API_API_KEY".into())]),
+                      allowed_config_options: vec!["mode".into()],
+                      forced_config: BTreeMap::from([
+                          (
+                              "model".into(),
+                              CodingAgentConfigValue::String("gpt-6-luna".into()),
+                          ),
+                          (
+                              "reasoning_effort".into(),
+                              CodingAgentConfigValue::String("max".into()),
+                          ),
+                      ]),
+                  },'''
+          )
+
+          replace(
+              "apps/desktop/src-tauri/src/webcodex/settings/acp.rs",
+              'use webcodex_core::coding_agent::CODING_AGENT_MAX_PROVIDERS;',
+              'use webcodex_core::coding_agent::{CodingAgentConfigValue, CODING_AGENT_MAX_PROVIDERS};'
+          )
+
+          replace(
+              "apps/desktop/src-tauri/src/webcodex/settings/acp.rs",
+              '''    set(
+                  table,
+                  "allowed_config_options",
+                  profile
+                      .allowed_config_options
+                      .iter()
+                      .cloned()
+                      .collect::<Array>()
+                      .into(),
+              );
+              set(table, OWNER_KEY, owner.into());''',
+              '''    set(
+                  table,
+                  "allowed_config_options",
+                  profile
+                      .allowed_config_options
+                      .iter()
+                      .cloned()
+                      .collect::<Array>()
+                      .into(),
+              );
+              let mut forced = InlineTable::new();
+              for (key, value) in &profile.forced_config {
+                  match value {
+                      CodingAgentConfigValue::String(value) => {
+                          forced.insert(key, Value::from(value.as_str()));
+                      }
+                      CodingAgentConfigValue::Bool(value) => {
+                          forced.insert(key, Value::from(*value));
+                      }
+                      CodingAgentConfigValue::Integer(_) => return Err(error()),
+                  }
+              }
+              set(table, "forced_config", forced.into());
+              set(table, OWNER_KEY, owner.into());'''
+          )
+
+          replace(
+              "apps/desktop/src/models/runner-capabilities.ts",
+              '''  env_from_env: Record<string, string>;
+              allowed_config_options: string[];
+          }''',
+              '''  env_from_env: Record<string, string>;
+              allowed_config_options: string[];
+              forced_config: Record<string, string | boolean>;
+          }'''
+          )
+
+          replace(
+              "apps/desktop/src/features/extensions/CodingAgentEditor.tsx",
+              '''  const [enabled, setEnabled] = useState(profile?.enabled ?? true);
+              const [options, setOptions] = useState(JSON.stringify(profile?.allowed_config_options ?? []));
+              const [mapping, setMapping]''',
+              '''  const [enabled, setEnabled] = useState(profile?.enabled ?? true);
+              const [options, setOptions] = useState(JSON.stringify(profile?.allowed_config_options ?? []));
+              const [forcedModel, setForcedModel] = useState(
+                typeof profile?.forced_config?.model === "string" ? profile.forced_config.model : profile ? "" : "gpt-6-luna",
+              );
+              const [forcedEffort, setForcedEffort] = useState(
+                typeof profile?.forced_config?.reasoning_effort === "string" ? profile.forced_config.reasoning_effort : profile ? "" : "max",
+              );
+              const [mapping, setMapping]'''
+          )
+
+          replace(
+              "apps/desktop/src/features/extensions/CodingAgentEditor.tsx",
+              '''      const parsedArgs = stringArray(args, 4096); const allowed = stringArray(options, 128);
+              if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(id.trim()) || new Set(allowed).size !== allowed.length || allowed.some(value => !value.trim())) throw new Error("invalid_fields");''',
+              '''      const parsedArgs = stringArray(args, 4096); const allowed = stringArray(options, 128);
+              const forced: Record<string, string | boolean> = { ...(profile?.forced_config ?? {}) };
+              delete forced.model;
+              delete forced.reasoning_effort;
+              if (forcedModel.trim()) forced.model = forcedModel.trim();
+              if (forcedEffort) forced.reasoning_effort = forcedEffort;
+              if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(id.trim())
+                || new Set(allowed).size !== allowed.length
+                || allowed.some(value => !value.trim())
+                || Object.keys(forced).some(value => allowed.includes(value))) throw new Error("invalid_fields");'''
+          )
+
+          replace(
+              "apps/desktop/src/features/extensions/CodingAgentEditor.tsx",
+              '''        profile: { provider_id: id.trim(), name: name.trim(), executable: executable.trim(), args: parsedArgs, enabled, env_from_env: Object.fromEntries(env), allowed_config_options: allowed },
+                  global_settings:''',
+              '''        profile: { provider_id: id.trim(), name: name.trim(), executable: executable.trim(), args: parsedArgs, enabled, env_from_env: Object.fromEntries(env), allowed_config_options: allowed, forced_config: forced },
+                  global_settings:'''
+          )
+
+          replace(
+              "apps/desktop/src/features/extensions/CodingAgentEditor.tsx",
+              '''        <div className="field-group"><label htmlFor="coding-agent-options">{r("allowedOptions")}</label><textarea id="coding-agent-options" value={options} onChange={event => setOptions(event.target.value)} rows={2} maxLength={16384} required disabled={busy} spellCheck={false} /></div>
+                  <label className="profile-checkbox" htmlFor="coding-global-settings">''',
+              '''        <div className="field-group"><label htmlFor="coding-agent-options">{r("allowedOptions")}</label><textarea id="coding-agent-options" value={options} onChange={event => setOptions(event.target.value)} rows={2} maxLength={16384} required disabled={busy} spellCheck={false} /></div>
+                  <div className="field-group"><label htmlFor="coding-agent-forced-model">{r("forcedModel")}</label><input id="coding-agent-forced-model" aria-label="Forced model" value={forcedModel} onChange={event => setForcedModel(event.target.value)} maxLength={128} disabled={busy} spellCheck={false} placeholder="gpt-6-luna" /></div>
+                  <div className="field-group"><label htmlFor="coding-agent-forced-effort">{r("forcedReasoning")}</label><select id="coding-agent-forced-effort" aria-label="Forced reasoning effort" value={forcedEffort} onChange={event => setForcedEffort(event.target.value)} disabled={busy}><option value="">—</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><small>{r("forcedHelp")}</small></div>
+                  <label className="profile-checkbox" htmlFor="coding-global-settings">'''
+          )
+
+          replace(
+              "apps/desktop/src/i18n/runner-capabilities.ts",
+              '''  allowedOptions: ["Allowed config options (JSON array)", "允许的配置选项（JSON 数组）", "Erlaubte Optionen (JSON-Array)", "Options autorisées (tableau JSON)", "許可する設定項目（JSON 配列）", "허용된 설정 옵션(JSON 배열)"],
+              globalSettings:''',
+              '''  allowedOptions: ["Allowed config options (JSON array)", "允许的配置选项（JSON 数组）", "Erlaubte Optionen (JSON-Array)", "Options autorisées (tableau JSON)", "許可する設定項目（JSON 配列）", "허용된 설정 옵션(JSON 배열)"],
+              forcedModel: ["Forced model", "强制模型", "Erzwungenes Modell", "Modèle imposé", "強制モデル", "강제 모델"],
+              forcedReasoning: ["Forced reasoning effort", "强制推理强度", "Erzwungene Denkstufe", "Effort de raisonnement imposé", "強制推論レベル", "강제 추론 강도"],
+              forcedHelp: ["Runner policy: callers cannot override these values. They are validated against the provider's live ACP options before prompt dispatch.", "Runner 策略：调用方不能覆盖这些值；发送 Prompt 前会根据 Provider 实时 ACP 选项校验。", "Runner-Richtlinie: Aufrufer können diese Werte nicht überschreiben; vor dem Prompt werden sie gegen die Live-ACP-Optionen geprüft.", "Politique Runner : l’appelant ne peut pas remplacer ces valeurs ; elles sont validées avec les options ACP actives avant le prompt.", "Runner ポリシーです。呼び出し側は上書きできず、Prompt 送信前に Provider の実際の ACP オプションで検証されます。", "Runner 정책입니다. 호출자가 덮어쓸 수 없으며 Prompt 전송 전에 Provider의 실제 ACP 옵션으로 검증됩니다."],
+              globalSettings:'''
+          )
+
+          replace(
+              "apps/desktop/src/features/RunnerCapabilities.test.tsx",
+              '''const profile: CodingAgentProfile = { provider_id: "pi", name: "Pi Agent", executable: "/fixture/pi-acp", args: ["--acp"], enabled: true, env_from_env: {}, allowed_config_options: [] };''',
+              '''const profile: CodingAgentProfile = { provider_id: "pi", name: "Pi Agent", executable: "/fixture/pi-acp", args: ["--acp"], enabled: true, env_from_env: {}, allowed_config_options: [], forced_config: { model: "gpt-6-luna", reasoning_effort: "max" } };'''
+          )
+
+          replace(
+              ".github/workflows/desktop-build.yml",
+              '''$installer = Join-Path $dist "webcodex-desktop-${{ steps.runtime.outputs.short }}-v${{ steps.runtime.outputs.version }}-win32-x64-setup.exe"''',
+              '''$installer = Join-Path $dist "webcodex-desktop-${{ steps.runtime.outputs.short }}-v${{ steps.runtime.outputs.version }}-gpt6-luna-max-win32-x64-setup.exe"'''
+          )
+          PY
+
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo fmt
+
+          git diff --check
+          grep -R -n 'gpt-6-luna'             apps/desktop/src-tauri/src/coding_agents/tests.rs             apps/desktop/src/features/RunnerCapabilities.test.tsx             apps/desktop/src/features/extensions/CodingAgentEditor.tsx
+
+      - name: Test Desktop backend
+        run: |
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml coding_agents
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml acp_reconcile
+
+      - name: Test forced_config Runner
+        run: |
+          cargo check --locked -p webcodex-runner
+          cargo test --locked -p webcodex-runner forced_config
+
+      - name: Test Desktop frontend
+        run: |
+          npm ci --prefix apps/desktop
+          npm run typecheck --prefix apps/desktop
+          npm test --prefix apps/desktop
+
+      - name: Publish tested UI patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add             apps/desktop/src-tauri/src/coding_agents.rs             apps/desktop/src-tauri/src/coding_agents/tests.rs             apps/desktop/src-tauri/src/webcodex/settings/acp.rs             apps/desktop/src/models/runner-capabilities.ts             apps/desktop/src/features/extensions/CodingAgentEditor.tsx             apps/desktop/src/i18n/runner-capabilities.ts             apps/desktop/src/features/RunnerCapabilities.test.tsx             .github/workflows/desktop-build.yml
+          git commit -m "feat(desktop): manage forced ACP model and effort [release-now]"
+          git push origin HEAD:main
