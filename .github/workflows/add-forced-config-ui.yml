@@ -38,6 +38,11 @@ jobs:
           git diff --check
           grep -R -n 'gpt-6-luna' apps/desktop/src-tauri/src/coding_agents/tests.rs apps/desktop/src/features/RunnerCapabilities.test.tsx apps/desktop/src/features/extensions/CodingAgentEditor.tsx
 
+      - name: Install Linux dependencies for Desktop backend tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
       - name: Test Desktop backend
         run: |
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml coding_agents
