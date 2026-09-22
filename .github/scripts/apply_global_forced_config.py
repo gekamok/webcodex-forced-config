@@ -756,6 +756,16 @@ text = text.replace(marker, test, 1)
 write(p, text)
 
 p = "apps/desktop/src-tauri/src/coding_agents/tests.rs"
+rep(p,
+'''        update.global_settings = Some(AcpGlobalSettings {
+            max_concurrent_runs: runs,
+            permission_timeout_secs: timeout,
+        });''',
+'''        update.global_settings = Some(AcpGlobalSettings {
+            max_concurrent_runs: runs,
+            permission_timeout_secs: timeout,
+            forced_config: default_global_forced_config(),
+        });''')
 text = read(p)
 idx = text.find("#[test]")
 if idx < 0:
