@@ -727,6 +727,10 @@ rep(p,
 p = "apps/desktop/src/features/RunnerCapabilities.test.tsx"
 text = read(p)
 text = text.replace(
+'const profile: CodingAgentProfile = { provider_id: "pi", name: "Pi Agent", executable: "/fixture/pi-acp", args: ["--acp"], enabled: true, env_from_env: {}, allowed_config_options: [], forced_config: { model: "gpt-6-luna", reasoning_effort: "max" } };',
+'const profile: CodingAgentProfile = { provider_id: "pi", name: "Pi Agent", executable: "/fixture/pi-acp", args: ["--acp"], enabled: true, env_from_env: {}, allowed_config_options: [], forced_config: {} };',
+)
+text = text.replace(
 'const api = vi.hoisted(() => ({ saveCodingAgent: vi.fn(),',
 'const api = vi.hoisted(() => ({ saveCodingAgent: vi.fn(), saveCodingAgentGlobals: vi.fn(),')
 marker = '''  it("never invents Active from desired state, another Runner or a stale provider name", async () => {'''
