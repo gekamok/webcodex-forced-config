@@ -1,7 +1,5 @@
 use super::*;
-use crate::coding_agents::{
-    CodingAgentGlobalsUpdate, CodingAgentRemove, CodingAgentStore, CodingAgentUpdate,
-};
+use crate::coding_agents::{CodingAgentRemove, CodingAgentStore, CodingAgentUpdate};
 
 impl AppState {
     pub async fn save_coding_agent(
@@ -10,16 +8,6 @@ impl AppState {
     ) -> DesktopResult<DesktopStateSnapshot> {
         self.mutate_coding_agents(request.target.clone(), move |store| {
             store.stage_update(request)
-        })
-        .await
-    }
-
-    pub async fn save_coding_agent_globals(
-        &self,
-        request: CodingAgentGlobalsUpdate,
-    ) -> DesktopResult<DesktopStateSnapshot> {
-        self.mutate_coding_agents(request.target.clone(), move |store| {
-            store.stage_global_settings(request.global_settings, request.expected_revision)
         })
         .await
     }
