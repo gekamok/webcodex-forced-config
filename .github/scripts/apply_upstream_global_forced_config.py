@@ -712,91 +712,6 @@ write(p, text)
 text = read(p)
 marker = '''    #[test]
     #[cfg(unix)]
-    fn forced_boolean_config_is_applied_before_prompt() {
-        let temp = TempDir::new().unwrap();
-        let (exe, args) = fake_agent(&temp, "forced_configs");
-        let mut cfg = fake_config(exe, args);
-        cfg.forced_config.insert(
-            "feature_flag".to_string(),
-            CodingAgentConfigValue::Bool(true),
-        );
-        let projects = project_fixture(&temp);
-        let root = temp.path().join("repo");
-        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
-        let run = "wc_agent_run_forcedbool0001";
-        assert!(manager
-            .handle(
-                start_request(&manager, &root, run, BTreeMap::new()),
-                &projects,
-            )
-            .error
-            .is_none());
-        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
-        assert_eq!(terminal.state, CodingAgentRunState::Completed);
-        assert_eq!(
-            received_config_ids(&wire_log(&temp)),
-            vec!["feature_flag".to_string()]
-        );
-        let log = wire_log(&temp);
-        let set = log
-            .iter()
-            .filter_map(|entry| entry.get("recv"))
-            .find(|recv| {
-                recv.get("method").and_then(Value::as_str) == Some("session/set_config_option")
-            })
-            .unwrap();
-        assert_eq!(
-            set.pointer("/params/type").and_then(Value::as_str),
-            Some("boolean")
-        );
-        assert_eq!(
-            set.pointer("/params/value").and_then(Value::as_bool),
-            Some(true)
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn illegal_forced_select_value_fails_without_prompt() {
-        let temp = TempDir::new().unwrap();
-        let (exe, args) = fake_agent(&temp, "forced_configs");
-        let mut cfg = fake_config(exe, args);
-        cfg.forced_config.insert(
-            "model".to_string(),
-            CodingAgentConfigValue::String("not-advertised-model".to_string()),
-        );
-        let projects = project_fixture(&temp);
-        let root = temp.path().join("repo");
-        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
-        let run = "wc_agent_run_forcedinvalid01";
-        assert!(manager
-            .handle(
-                start_request(&manager, &root, run, BTreeMap::new()),
-                &projects,
-            )
-            .error
-            .is_none());
-        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
-        assert_eq!(terminal.state, CodingAgentRunState::Failed);
-        assert_eq!(
-            terminal
-                .terminal
-                .as_ref()
-                .and_then(|terminal| terminal.error_code.as_deref()),
-            Some("coding_agent_forced_config_invalid")
-        );
-        assert!(received_config_ids(&wire_log(&temp)).is_empty());
-        assert_eq!(
-            received_methods(&wire_log(&temp))
-                .iter()
-                .filter(|method| method.as_str() == "session/prompt")
-                .count(),
-            0
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
     fn config_setup_cumulatively_consumes_total_run_deadline() {'''
 tests = r'''    #[test]
     #[cfg(unix)]
@@ -1111,6 +1026,91 @@ tests = r'''    #[test]
                 .count(),
             1,
             "unsupported provider must fail before prompt dispatch"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn forced_boolean_config_is_applied_before_prompt() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_configs");
+        let mut cfg = fake_config(exe, args);
+        cfg.forced_config.insert(
+            "feature_flag".to_string(),
+            CodingAgentConfigValue::Bool(true),
+        );
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_forcedbool0001";
+        assert!(manager
+            .handle(
+                start_request(&manager, &root, run, BTreeMap::new()),
+                &projects,
+            )
+            .error
+            .is_none());
+        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+        assert_eq!(terminal.state, CodingAgentRunState::Completed);
+        assert_eq!(
+            received_config_ids(&wire_log(&temp)),
+            vec!["feature_flag".to_string()]
+        );
+        let log = wire_log(&temp);
+        let set = log
+            .iter()
+            .filter_map(|entry| entry.get("recv"))
+            .find(|recv| {
+                recv.get("method").and_then(Value::as_str) == Some("session/set_config_option")
+            })
+            .unwrap();
+        assert_eq!(
+            set.pointer("/params/type").and_then(Value::as_str),
+            Some("boolean")
+        );
+        assert_eq!(
+            set.pointer("/params/value").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn illegal_forced_select_value_fails_without_prompt() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_configs");
+        let mut cfg = fake_config(exe, args);
+        cfg.forced_config.insert(
+            "model".to_string(),
+            CodingAgentConfigValue::String("not-advertised-model".to_string()),
+        );
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_forcedinvalid01";
+        assert!(manager
+            .handle(
+                start_request(&manager, &root, run, BTreeMap::new()),
+                &projects,
+            )
+            .error
+            .is_none());
+        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+        assert_eq!(terminal.state, CodingAgentRunState::Failed);
+        assert_eq!(
+            terminal
+                .terminal
+                .as_ref()
+                .and_then(|terminal| terminal.error_code.as_deref()),
+            Some("coding_agent_forced_config_invalid")
+        );
+        assert!(received_config_ids(&wire_log(&temp)).is_empty());
+        assert_eq!(
+            received_methods(&wire_log(&temp))
+                .iter()
+                .filter(|method| method.as_str() == "session/prompt")
+                .count(),
+            0
         );
     }
 
