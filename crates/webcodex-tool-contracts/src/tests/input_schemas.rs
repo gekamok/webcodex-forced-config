@@ -390,6 +390,22 @@ fn sync_validation_and_run_shell_timeout_schema_defers_upper_bounds_to_runtime()
 }
 
 #[test]
+fn cargo_check_schema_exposes_bounded_multi_package_selection() {
+    let specs = registered_tool_specs();
+    let schema = &spec_named(&specs, "cargo_check").input_schema;
+    let packages = &schema["properties"]["packages"];
+
+    assert_eq!(packages["type"], "array");
+    assert_eq!(packages["minItems"], 1);
+    assert!(packages["maxItems"].as_u64().is_some());
+    assert_eq!(packages["items"]["minLength"], 1);
+    assert_eq!(packages["items"]["maxLength"], 500);
+    assert!(packages["description"]
+        .as_str()
+        .is_some_and(|description| description.contains("package")));
+}
+
+#[test]
 fn cargo_test_schema_explains_execution_proof_policy() {
     let specs = registered_tool_specs();
     let spec = spec_named(&specs, "cargo_test");
@@ -532,12 +548,20 @@ fn run_script_schema_is_typed_bounded_and_hides_execution_infrastructure() {
     );
     assert_eq!(
         properties["language"]["enum"],
-        json!(["sh", "bash", "powershell", "javascript", "typescript"])
+        json!([
+            "sh",
+            "bash",
+            "powershell",
+            "python",
+            "javascript",
+            "typescript"
+        ])
     );
     let language_description = properties["language"]["description"]
         .as_str()
         .expect("run_script language description");
     for phrase in [
+        "temporary .py file",
         ".mjs ESM",
         ".mts ESM",
         "erasable type stripping",
@@ -1253,4 +1277,23 @@ fn skill_runtime_and_management_schemas_preserve_typed_bounds() {
             "{name}"
         );
     }
+}
+#[test]
+fn process_alias_and_python_are_host_visible_without_opening_objects() {
+    for name in ["run_process", "run_detached_process"] {
+        let schema = input_schema_for_tool(name);
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["argv"]["type"], "array");
+        assert_eq!(
+            schema["properties"]["argv"]["maxItems"],
+            schema["properties"]["args"]["maxItems"]
+        );
+        assert!(schema["properties"].get("arguments").is_none());
+    }
+    let schema = input_schema_for_tool("run_script");
+    let language = schema["properties"]["language"].to_string();
+    assert!(language.contains("python"));
+    assert!(!language.contains("python3"));
+    let shell = input_schema_for_tool("run_shell");
+    assert_eq!(shell["properties"]["login"]["type"], "boolean");
 }

@@ -351,6 +351,19 @@ fn job_reconciliation_local_snapshot_advances_before_best_effort_send() {
     assert_eq!(logs.stdout.tail, "one\ntwo\n");
     assert_eq!(logs.stdout.next_line, 3);
 
+    // Receiving the replay proves it entered the transport queue, but the
+    // delivery worker may not yet have acknowledged the same update_seq in its
+    // local pending queue. Wait for that first delivery to retire before
+    // simulating a later server stop; otherwise the resend can legitimately
+    // coalesce with the still-pending identical sequence and the test races its
+    // own delivery bookkeeping.
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            !lock_unpoison(&manager.pending_job_updates).contains_key("offline-terminal-job")
+        }),
+        "first terminal replay must retire before simulating the later stop"
+    );
+
     manager.stop("offline-terminal-job").unwrap();
     let stopped_race = recv_job_update(
         &mut fresh_rx,
@@ -4918,6 +4931,7 @@ fn runner_real_process_job_timeout_terminates_the_whole_tree() {
 
 pub(crate) fn shell_job_request(cwd: &Path, command: &str) -> RunnerRequest {
     RunnerRequest {
+        login: false,
         shell: None,
         request_id: "req-job".to_string(),
         client_id: "ws-client".to_string(),
@@ -5193,6 +5207,7 @@ fn job_manager_stop_all_clears_queue_and_requests_running_stop() {
     );
     let (sink, mut rx) = ws_sink("ws-client");
     let request = RunnerRequest {
+        login: false,
         shell: None,
         request_id: "req-queued".to_string(),
         client_id: "ws-client".to_string(),

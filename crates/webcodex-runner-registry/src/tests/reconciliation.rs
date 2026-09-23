@@ -45,6 +45,7 @@ fn reconciliation_capabilities() -> RunnerCapabilities {
         structured_cargo_test_count_assertion: true,
         structured_cargo_test_execution_policy: true,
         structured_cargo_test_lib: true,
+        structured_cargo_check_packages: true,
         job_state_reconciliation: true,
         coding_agent_runs: false,
         ..Default::default()
@@ -109,6 +110,7 @@ async fn register(registry: &RunnerRegistry, instance: &str, inventory: ShellJob
 
 fn start_request(command: &str) -> ShellJobOpRequest {
     ShellJobOpRequest {
+        login: false,
         op: "start".to_string(),
         client_id: Some(CLIENT_ID.to_string()),
         cwd: Some("/srv/demo".to_string()),
@@ -170,6 +172,45 @@ fn cargo_lib_validation_start_metadata() -> ShellJobStartMetadata {
         }
     }
     metadata
+}
+
+fn multi_package_cargo_check_start_metadata() -> ShellJobStartMetadata {
+    let step = ShellJobValidationStep {
+        name: "check".to_string(),
+        program: "cargo".to_string(),
+        args: vec![
+            "check".to_string(),
+            "--all-targets".to_string(),
+            "-p".to_string(),
+            "package-a".to_string(),
+            "-p".to_string(),
+            "package-b".to_string(),
+        ],
+        env: Vec::new(),
+    };
+    ShellJobStartMetadata {
+        project_id: Some(RUNTIME_PROJECT_ID.to_string()),
+        session_id: Some(SESSION_ID.to_string()),
+        project_cwd: Some("/srv/demo".to_string()),
+        purpose: Some("validation".to_string()),
+        shell: Some("direct_argv".to_string()),
+        validation_steps: vec![step.clone()],
+        validation: Some(ShellJobValidationMetadata {
+            source_fence: None,
+            tool: "cargo_check".to_string(),
+            kind: "check".to_string(),
+            steps: vec![step],
+            effective_timeout_secs: 600,
+            sync_wait_secs: 1,
+            adapter: "cargo_check".to_string(),
+            validation_target_id: Some("target:1123456789abcdef01234567".to_string()),
+            minimum_tests: None,
+            require_tests: None,
+            no_run: None,
+        }),
+        visibility: ShellJobVisibility::Public,
+        ..Default::default()
+    }
 }
 
 async fn start_and_take_over(
@@ -574,6 +615,29 @@ async fn old_structured_runner_fails_closed_on_cargo_test_lib_selector() {
         .unwrap_err();
     assert!(
         error.contains("structured_cargo_test_lib_unavailable"),
+        "error={error}"
+    );
+    assert!(registry.list_jobs(Some(100)).await.is_empty());
+}
+
+#[tokio::test]
+async fn old_structured_runner_fails_closed_on_multi_package_cargo_check() {
+    let registry = RunnerRegistry::default();
+    let mut registration = register_request(INSTANCE_A, empty_inventory());
+    registration.capabilities.structured_cargo_check_packages = false;
+    assert!(registration.capabilities.structured_validation_argv);
+    registry.register(registration).await.unwrap();
+
+    let error = registry
+        .start_job_with_metadata(
+            start_request("validation"),
+            "tester".to_string(),
+            multi_package_cargo_check_start_metadata(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("structured_cargo_check_packages_unavailable"),
         "error={error}"
     );
     assert!(registry.list_jobs(Some(100)).await.is_empty());
@@ -1168,6 +1232,41 @@ async fn typescript_structured_job_start_requires_additive_runner_capability() {
         request.script.as_ref().map(|script| script.language),
         Some(ShellScriptLanguage::Typescript)
     );
+}
+
+#[tokio::test]
+async fn python_script_job_requires_additive_runner_capability() {
+    let registry = RunnerRegistry::default();
+    let mut old_runner = register_request(INSTANCE_A, empty_inventory());
+    old_runner.capabilities.structured_script_payload = true;
+    old_runner.capabilities.structured_execution_jobs = true;
+    old_runner.capabilities.structured_script_python = false;
+    registry.register(old_runner).await.unwrap();
+    let metadata = || ShellJobStartMetadata {
+        project_id: Some(RUNTIME_PROJECT_ID.to_string()),
+        session_id: Some(SESSION_ID.to_string()),
+        project_cwd: Some("/srv/demo".to_string()),
+        purpose: Some("operation".to_string()),
+        shell: Some("python".to_string()),
+        visibility: ShellJobVisibility::HiddenUntilHandoff,
+        structured_execution: Some(StructuredJobExecution::Script(ShellScriptPayload {
+            language: ShellScriptLanguage::Python,
+            script: "print('雪')\n".to_string(),
+            args: vec!["two words".to_string()],
+        })),
+        ..Default::default()
+    };
+    let error = registry.start_job_with_metadata(start_request(""), "tester".to_string(), metadata()).await.unwrap_err();
+    assert!(error.contains("structured_script_python"), "{error}");
+    assert!(registry.poll(RunnerPollRequest {client_id: CLIENT_ID.to_string(), runner_instance_id: INSTANCE_A.to_string()}).await.unwrap().is_none());
+
+    let mut upgraded = register_request(INSTANCE_A, empty_inventory());
+    upgraded.capabilities.structured_script_python = true;
+    registry.register(upgraded).await.unwrap();
+    let job = registry.start_job_with_metadata(start_request(""), "tester".to_string(), metadata()).await.unwrap();
+    let request = registry.poll(RunnerPollRequest {client_id: CLIENT_ID.to_string(), runner_instance_id: INSTANCE_A.to_string()}).await.unwrap().unwrap();
+    assert_eq!(request.job_id.as_deref(), Some(job.job_id.as_str()));
+    assert_eq!(request.script.unwrap().language, ShellScriptLanguage::Python);
 }
 
 #[tokio::test]

@@ -34,32 +34,9 @@ pub(crate) fn request(id: &str, revision: u64) -> CodingAgentUpdate {
             enabled: true,
             env_from_env: BTreeMap::from([("OPENAI_API_KEY".into(), "SUB2API_API_KEY".into())]),
             allowed_config_options: vec!["mode".into()],
-            forced_config: BTreeMap::from([
-                (
-                    "model".into(),
-                    CodingAgentConfigValue::String("gpt-6-luna".into()),
-                ),
-                (
-                    "reasoning_effort".into(),
-                    CodingAgentConfigValue::String("max".into()),
-                ),
-            ]),
         },
         global_settings: None,
     }
-}
-
-#[test]
-fn global_settings_default_to_gpt6_luna_max() {
-    let settings = AcpGlobalSettings::default();
-    assert_eq!(
-        settings.forced_config.get("model"),
-        Some(&CodingAgentConfigValue::String("gpt-6-luna".into()))
-    );
-    assert_eq!(
-        settings.forced_config.get("reasoning_effort"),
-        Some(&CodingAgentConfigValue::String("max".into()))
-    );
 }
 
 #[test]
@@ -181,7 +158,6 @@ fn coding_agents_capacity_and_advanced_settings_are_bounded() {
         update.global_settings = Some(AcpGlobalSettings {
             max_concurrent_runs: runs,
             permission_timeout_secs: timeout,
-            forced_config: default_global_forced_config(),
         });
         assert!(store.clone().stage_update(update).is_err());
     }

@@ -10,6 +10,62 @@ use crate::metadata::{
 };
 
 pub(super) const DEFINITIONS: &[ToolDefinition] = &[
+    requires_explicit_business_session(
+        def(
+            "record_external_observation",
+            super::ToolAuditPolicy::typed_fields(&[
+                super::ToolAuditResultField::value("session_id"),
+                super::ToolAuditResultField::value("error_kind"),
+            ]),
+            ModelHidden,
+            TOOL_CATEGORY_SESSION,
+            None,
+            TOOL_PROVIDER_CONTROL,
+            super::ToolSemanticContract {
+                effect: super::ToolEffect::Mutate,
+                risk: super::ToolRisk::SessionCollaborate,
+                approval: super::ToolApprovalPolicy::None,
+                idempotency: super::ToolIdempotency::FencedReplay,
+            },
+            Some(SESSION_COLLABORATE),
+            true,
+            NoPath,
+            false,
+            false,
+            super::ToolSessionEvidencePolicy::NONE
+                .lifecycle(super::ToolSessionLifecycleEffect::Mutation),
+        )
+        .with_activity(
+            super::ToolActivityPresentation::Support,
+            super::ToolActivityInteraction::NonMeaningful,
+        ),
+    ),
+
+    requires_explicit_business_session(model_spec(
+        def(
+            "list_external_observations",
+            super::ToolAuditPolicy::typed_fields(&[
+                super::ToolAuditResultField::value("session_id"),
+                super::ToolAuditResultField::value("error_kind"),
+            ]),
+            ModelVisible, TOOL_CATEGORY_SESSION, None, TOOL_PROVIDER_CONTROL,
+            super::ToolSemanticContract {
+                effect: super::ToolEffect::Observe,
+                risk: Read,
+                approval: super::ToolApprovalPolicy::None,
+                idempotency: super::ToolIdempotency::PureRead,
+            },
+            Some(RUNTIME_READ), true, NoPath, false, false,
+            super::ToolSessionEvidencePolicy::NONE,
+        )
+        .with_activity(
+            super::ToolActivityPresentation::Support,
+            super::ToolActivityInteraction::NonMeaningful,
+        )
+        .with_gpt_action_description("Read retained external reports for an exact Session/Project. These are untrusted adapter claims, not native execution or validation evidence; current capture completeness and source order are unproven."),
+        "Read all retained external reports for an exact Session/Project (at most 256). Reports are untrusted adapter claims, separate from native Job and validation evidence. They never establish task completion or authorize replaying work. coverage remains incomplete until a durable source sequence can prove gaps/order.",
+    )),
+
     def(
         "start_session",
         super::ToolAuditPolicy::TYPED_CANONICAL,
@@ -565,8 +621,38 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolActivityPresentation::Support,
             super::ToolActivityInteraction::Meaningful,
         ),
-            "Explicit read-only recovery for genuinely missing task context or an explicit handoff; requires the exact session_id. Do not use as routine progress/status polling or to establish a Session baseline when current context is coherent. Defaults to identity plus deterministic handoff_brief, hard-bounded at 8 KiB: task instructions, workspace, progress, validation, jobs, collaboration attention, next actions and basis completeness. Omitted project uses the authorized Session Project. diagnostic=true adds detailed ledger and closeout evidence. A concurrent Session change marks the basis incomplete; re-observe before dependent work. No checkpoint allocation, ACK token, or authority grant.",
+            "Explicit read-only recovery for genuinely missing task context or an explicit handoff; requires the exact session_id. Do not use as routine progress/status polling or to establish a Session baseline when current context is coherent. Defaults to identity plus deterministic handoff_brief, hard-bounded at 8 KiB: task instructions, workspace, progress, validation, jobs, collaboration attention, bounded external reports, next actions and basis completeness. External reports retain exact source IDs and unknown outcomes, with incomplete capture coverage; they are not native execution or validation. Omitted project uses the authorized Session Project. diagnostic=true adds detailed ledger and closeout evidence. A concurrent Session change marks the basis incomplete; re-observe before dependent work. No checkpoint allocation, ACK token, or authority grant.",
         ).with_gpt_action_description("Recover missing task context or perform an explicit handoff for an exact session_id. Do not use for routine progress/status polling or to establish a baseline. Returns a bounded handoff_brief; diagnostic=true adds detailed evidence. Check basis completeness before dependent work. Read-only.")),
         16,
+    ),
+    requires_explicit_business_session(
+        def(
+            "session_handoff_state",
+            super::ToolAuditPolicy::typed_fields(&[
+                super::ToolAuditResultField::value("session_id"),
+                super::ToolAuditResultField::value("project"),
+                super::ToolAuditResultField::value("error_kind"),
+            ]),
+            ModelHidden,
+            TOOL_CATEGORY_SESSION,
+            None,
+            TOOL_PROVIDER_CONTROL,
+            super::ToolSemanticContract {
+                effect: super::ToolEffect::Observe,
+                risk: Read,
+                approval: super::ToolApprovalPolicy::None,
+                idempotency: super::ToolIdempotency::PureRead,
+            },
+            Some(RUNTIME_READ),
+            true,
+            NoPath,
+            false,
+            false,
+            super::ToolSessionEvidencePolicy::NONE,
+        )
+        .with_activity(
+            super::ToolActivityPresentation::Support,
+            super::ToolActivityInteraction::NonMeaningful,
+        ),
     ),
 ];

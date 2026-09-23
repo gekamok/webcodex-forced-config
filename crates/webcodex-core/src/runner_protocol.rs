@@ -7,20 +7,21 @@ mod job;
 mod transport;
 
 pub use job::{
-    normalize_cargo_value, normalize_go_test_packages, normalize_rust_test_filter,
-    valid_rust_test_filter, RunnerJobLogRequest, RunnerJobLogResponse, RunnerJobResult,
-    RunnerJobStatusRequest, RunnerJobStatusResponse, RunnerJobStopRequest, RunnerJobStopResponse,
-    RunnerJobUpdateRequest, RunnerJobUpdateResponse, RunnerJobsListRequest, RunnerJobsListResponse,
-    RunnerShellJobResult, ShellJobActivity, ShellJobActivityPhase, ShellJobActivitySource,
-    ShellJobActivityState, ShellJobCodexMetadata, ShellJobContext, ShellJobInfo, ShellJobInventory,
-    ShellJobLogSnapshot, ShellJobOpRequest, ShellJobOpResponse, ShellJobSnapshot,
-    ShellJobStreamSnapshot, ShellJobStructuredExecutionMetadata, ShellJobTestCountEvidence,
-    ShellJobValidationMetadata, ShellJobValidationProgress, ShellJobValidationStep,
-    CARGO_TEST_MIN_TESTS_MAX, CARGO_VALUE_MAX_BYTES, GO_TEST_PACKAGE_MAX_BYTES,
-    GO_TEST_PACKAGE_MAX_ITEMS, JOB_INVENTORY_MAX_ACTIVE_JOBS, JOB_INVENTORY_MAX_JOBS,
-    JOB_INVENTORY_MAX_SERIALIZED_BYTES, JOB_INVENTORY_MAX_TERMINAL_JOBS,
-    JOB_SNAPSHOT_STREAM_MAX_BYTES, JOB_TERMINAL_RETENTION_SECS, RUNNER_JOB_CONCURRENCY_MAX,
-    RUNNER_JOB_CONCURRENCY_MIN, RUST_TEST_FILTER_MAX_BYTES, VALIDATION_ASSERTION_NAME_MAX_CHARS,
+    normalize_cargo_packages, normalize_cargo_value, normalize_go_test_packages,
+    normalize_rust_test_filter, valid_rust_test_filter, RunnerJobLogRequest, RunnerJobLogResponse,
+    RunnerJobResult, RunnerJobStatusRequest, RunnerJobStatusResponse, RunnerJobStopRequest,
+    RunnerJobStopResponse, RunnerJobUpdateRequest, RunnerJobUpdateResponse, RunnerJobsListRequest,
+    RunnerJobsListResponse, RunnerShellJobResult, ShellJobActivity, ShellJobActivityPhase,
+    ShellJobActivitySource, ShellJobActivityState, ShellJobCodexMetadata, ShellJobContext,
+    ShellJobInfo, ShellJobInventory, ShellJobLogSnapshot, ShellJobOpRequest, ShellJobOpResponse,
+    ShellJobSnapshot, ShellJobStreamSnapshot, ShellJobStructuredExecutionMetadata,
+    ShellJobTestCountEvidence, ShellJobValidationMetadata, ShellJobValidationProgress,
+    ShellJobValidationStep, CARGO_PACKAGE_MAX_ITEMS, CARGO_TEST_MIN_TESTS_MAX,
+    CARGO_VALUE_MAX_BYTES, GO_TEST_PACKAGE_MAX_BYTES, GO_TEST_PACKAGE_MAX_ITEMS,
+    JOB_INVENTORY_MAX_ACTIVE_JOBS, JOB_INVENTORY_MAX_JOBS, JOB_INVENTORY_MAX_SERIALIZED_BYTES,
+    JOB_INVENTORY_MAX_TERMINAL_JOBS, JOB_SNAPSHOT_STREAM_MAX_BYTES, JOB_TERMINAL_RETENTION_SECS,
+    RUNNER_JOB_CONCURRENCY_MAX, RUNNER_JOB_CONCURRENCY_MIN, RUST_TEST_FILTER_MAX_BYTES,
+    VALIDATION_ASSERTION_NAME_MAX_CHARS,
 };
 
 pub use transport::{
@@ -145,6 +146,7 @@ pub const RUNNER_CAPABILITY_SHELL: &str = "shell";
 /// older Runners is false; current Servers fail closed rather than sending a
 /// POSIX `exec ... -c` wrapper to an unrelated configured shell.
 pub const RUNNER_CAPABILITY_EXPLICIT_SHELL_SELECTION: &str = "explicit_shell_selection";
+pub const RUNNER_CAPABILITY_BASH_LOGIN_SHELL: &str = "bash_login_shell";
 pub const RUNNER_CAPABILITY_FILE_READ: &str = "file_read";
 pub const RUNNER_CAPABILITY_FILE_WRITE: &str = "file_write";
 /// The Runner implements a narrow internal project-artifact export chunk read
@@ -225,6 +227,11 @@ pub const RUNNER_CAPABILITY_STRUCTURED_CARGO_TEST_EXECUTION_POLICY: &str =
 /// `--lib` selector. Older Runners may already support structured Cargo argv
 /// without this additive selector, so newer Servers must fence it explicitly.
 pub const RUNNER_CAPABILITY_STRUCTURED_CARGO_TEST_LIB: &str = "structured_cargo_test_lib";
+/// The Runner accepts one canonical Cargo check validation step containing
+/// repeated `-p <package>` selectors. Older Runners accepted at most one
+/// package even when they advertised generic structured validation argv.
+pub const RUNNER_CAPABILITY_STRUCTURED_CARGO_CHECK_PACKAGES: &str =
+    "structured_cargo_check_packages";
 /// The Runner accepts the canonical machine-readable `go test -json` validation
 /// shape. Older implementations may support only the historical fixed `./...`
 /// scope; expanded caller-selected packages are fenced separately.
@@ -261,6 +268,8 @@ pub const RUNNER_CAPABILITY_STRUCTURED_SCRIPT_JAVASCRIPT: &str = "structured_scr
 /// JavaScript without understanding this newer wire enum variant. This bit
 /// describes protocol semantics, not local Node.js executable/version support.
 pub const RUNNER_CAPABILITY_STRUCTURED_SCRIPT_TYPESCRIPT: &str = "structured_script_typescript";
+/// Additive typed Python script language; missing on older Runners is false.
+pub const RUNNER_CAPABILITY_STRUCTURED_SCRIPT_PYTHON: &str = "structured_script_python";
 /// Runner-owned WebCodex-generated POSIX programs execute through an explicit
 /// internal runtime instead of the configured interactive shell. Missing on
 /// older Runners is false so Control never sends the dedicated request kind to
@@ -443,6 +452,7 @@ pub const RUNNER_PROTOCOL_GENERATION_V2_BASELINE_CAPABILITY_NAMES: &[&str] = &[
 pub const RUNNER_CAPABILITY_NAMES: &[&str] = &[
     RUNNER_CAPABILITY_SHELL,
     RUNNER_CAPABILITY_EXPLICIT_SHELL_SELECTION,
+    RUNNER_CAPABILITY_BASH_LOGIN_SHELL,
     RUNNER_CAPABILITY_FILE_READ,
     RUNNER_CAPABILITY_FILE_WRITE,
     RUNNER_CAPABILITY_ARTIFACT_EXPORT_CHUNK_READ,
@@ -465,11 +475,13 @@ pub const RUNNER_CAPABILITY_NAMES: &[&str] = &[
     RUNNER_CAPABILITY_STRUCTURED_CARGO_TEST_COUNT_ASSERTION,
     RUNNER_CAPABILITY_STRUCTURED_CARGO_TEST_EXECUTION_POLICY,
     RUNNER_CAPABILITY_STRUCTURED_CARGO_TEST_LIB,
+    RUNNER_CAPABILITY_STRUCTURED_CARGO_CHECK_PACKAGES,
     RUNNER_CAPABILITY_STRUCTURED_GO_TEST_JSON,
     RUNNER_CAPABILITY_STRUCTURED_GO_TEST_TOOL,
     RUNNER_CAPABILITY_STRUCTURED_GO_TEST_PACKAGES,
     RUNNER_CAPABILITY_STRUCTURED_PROCESS_ARGV,
     RUNNER_CAPABILITY_STRUCTURED_SCRIPT_PAYLOAD,
+    RUNNER_CAPABILITY_STRUCTURED_SCRIPT_PYTHON,
     RUNNER_CAPABILITY_STRUCTURED_SCRIPT_JAVASCRIPT,
     RUNNER_CAPABILITY_STRUCTURED_SCRIPT_TYPESCRIPT,
     RUNNER_CAPABILITY_INTERNAL_POSIX_SCRIPT,
@@ -533,6 +545,8 @@ pub struct RunnerCapabilities {
     /// execution. Missing on older Runners is false and is never inferred.
     #[serde(default, skip_serializing_if = "is_false")]
     pub explicit_shell_selection: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bash_login_shell: bool,
     #[serde(default)]
     pub file_read: bool,
     #[serde(default)]
@@ -611,6 +625,11 @@ pub struct RunnerCapabilities {
     /// Runners is false and is never inferred from generic structured argv.
     #[serde(default, skip_serializing_if = "is_false")]
     pub structured_cargo_test_lib: bool,
+    /// Additive canonical Cargo check support for repeated `-p` selectors in
+    /// one validation argv. Missing on older Runners is false and is never
+    /// inferred from generic structured validation support.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub structured_cargo_check_packages: bool,
     /// Machine-readable canonical `go test -json` validation. Older Runners may
     /// support only the historical fixed `./...` scope; focused package argv is
     /// an independent additive capability.
@@ -647,6 +666,8 @@ pub struct RunnerCapabilities {
     /// and native TypeScript support are resolved separately at execution time.
     #[serde(default, skip_serializing_if = "is_false")]
     pub structured_script_typescript: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub structured_script_python: bool,
     /// Dedicated server-generated POSIX script request kind. Missing on older
     /// Runners is false and is never inferred from raw shell or typed public
     /// script support.
@@ -1011,6 +1032,7 @@ impl Default for RunnerCapabilities {
         Self {
             shell: true,
             explicit_shell_selection: false,
+            bash_login_shell: false,
             file_read: false,
             file_write: false,
             artifact_export_chunk_read: false,
@@ -1033,6 +1055,7 @@ impl Default for RunnerCapabilities {
             structured_cargo_test_count_assertion: false,
             structured_cargo_test_execution_policy: false,
             structured_cargo_test_lib: false,
+            structured_cargo_check_packages: false,
             structured_go_test_json: false,
             structured_go_test_tool: false,
             structured_go_test_packages: false,
@@ -1040,6 +1063,7 @@ impl Default for RunnerCapabilities {
             structured_script_payload: false,
             structured_script_javascript: false,
             structured_script_typescript: false,
+            structured_script_python: false,
             internal_posix_script: false,
             structured_execution_jobs: false,
             detached_process_jobs: false,
@@ -1644,6 +1668,8 @@ pub struct ShellRunRequest {
     #[serde(default)]
     pub cwd: Option<String>,
     pub command: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub login: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdin: Option<String>,
     #[serde(default = "default_timeout_secs")]
@@ -1672,6 +1698,7 @@ pub enum ShellScriptLanguage {
     Sh,
     Bash,
     Powershell,
+    Python,
     Javascript,
     Typescript,
 }
@@ -1682,6 +1709,7 @@ impl ShellScriptLanguage {
             Self::Sh => "sh",
             Self::Bash => "bash",
             Self::Powershell => "powershell",
+            Self::Python => "python",
             Self::Javascript => "javascript",
             Self::Typescript => "typescript",
         }
@@ -1691,6 +1719,7 @@ impl ShellScriptLanguage {
         match self {
             Self::Sh | Self::Bash => ".sh",
             Self::Powershell => ".ps1",
+            Self::Python => ".py",
             Self::Javascript => ".mjs",
             Self::Typescript => ".mts",
         }
@@ -1992,6 +2021,8 @@ pub struct RunnerRequest {
     /// admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<crate::workflow_session_contract::ExecutionShell>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub login: bool,
     /// Typed native process payload. Present only for `kind = "run_process"`
     /// or `kind = "start_process_job"`; defaults to `None` for backward
     /// compatibility with older envelopes.
@@ -2388,6 +2419,7 @@ mod envelope_tests {
 
     fn sample_process_request() -> RunnerRequest {
         RunnerRequest {
+            login: false,
             request_id: "req-process-1".to_string(),
             client_id: "ws-1".to_string(),
             kind: "run_process".to_string(),
@@ -2457,6 +2489,7 @@ mod envelope_tests {
 
     fn sample_script_request() -> RunnerRequest {
         RunnerRequest {
+            login: false,
             request_id: "req-script-1".to_string(),
             client_id: "ws-1".to_string(),
             kind: "run_script".to_string(),
@@ -2577,6 +2610,7 @@ mod envelope_tests {
             capabilities: RunnerCapabilities {
                 shell: true,
                 explicit_shell_selection: false,
+                bash_login_shell: false,
                 file_read: true,
                 file_write: false,
                 artifact_export_chunk_read: false,
@@ -2599,6 +2633,7 @@ mod envelope_tests {
                 structured_cargo_test_count_assertion: true,
                 structured_cargo_test_execution_policy: true,
                 structured_cargo_test_lib: true,
+                structured_cargo_check_packages: true,
                 structured_go_test_json: true,
                 structured_go_test_tool: true,
                 structured_go_test_packages: true,
@@ -2606,6 +2641,7 @@ mod envelope_tests {
                 structured_script_payload: true,
                 structured_script_javascript: true,
                 structured_script_typescript: true,
+                structured_script_python: true,
                 internal_posix_script: true,
                 structured_execution_jobs: true,
                 detached_process_jobs: true,
@@ -3039,6 +3075,7 @@ mod envelope_tests {
     #[test]
     fn request_envelope_flattens_shell_request_fields() {
         let request = RunnerRequest {
+            login: false,
             request_id: "req-1".to_string(),
             client_id: "ws-1".to_string(),
             kind: "run_shell".to_string(),
@@ -3403,6 +3440,17 @@ mod envelope_tests {
             ShellScriptLanguage::Javascript
         );
         assert!(serde_json::from_str::<ShellScriptLanguage>("\"js\"").is_err());
+    }
+
+    #[test]
+    fn python_script_language_is_canonical_and_uses_py() {
+        assert_eq!(ShellScriptLanguage::Python.as_str(), "python");
+        assert_eq!(ShellScriptLanguage::Python.file_extension(), ".py");
+        assert_eq!(
+            serde_json::to_string(&ShellScriptLanguage::Python).unwrap(),
+            "\"python\""
+        );
+        assert!(serde_json::from_str::<ShellScriptLanguage>("\"python3\"").is_err());
     }
 
     #[test]
@@ -3872,6 +3920,7 @@ mod envelope_tests {
             &[
                 "shell",
                 "explicit_shell_selection",
+                "bash_login_shell",
                 "file_read",
                 "file_write",
                 "artifact_export_chunk_read",
@@ -3894,11 +3943,13 @@ mod envelope_tests {
                 "structured_cargo_test_count_assertion",
                 "structured_cargo_test_execution_policy",
                 "structured_cargo_test_lib",
+                "structured_cargo_check_packages",
                 "structured_go_test_json",
                 "structured_go_test_tool",
                 "structured_go_test_packages",
                 "structured_process_argv",
                 "structured_script_payload",
+                "structured_script_python",
                 "structured_script_javascript",
                 "structured_script_typescript",
                 "internal_posix_script",
@@ -4422,6 +4473,7 @@ mod filter_canonical_tests {
             vec!["check", "--features", "serde"],
             vec!["check", "--features", "a b"],
             vec!["check", "-p", "my-crate"],
+            vec!["check", "-p", "crate-a", "-p", "crate-b"],
             vec![
                 "check",
                 "--all-targets",
@@ -4450,6 +4502,7 @@ mod filter_canonical_tests {
             vec!["check", "--features", "serde  "],
             vec!["check", "--features", "line\nbreak"],
             vec!["check", "-p", "tab\tvalue"],
+            vec!["check", "-p", "same-crate", "-p", "same-crate"],
             vec!["check", "--manifest-path", "/tmp/Cargo.toml"],
             vec!["check", "--locked"],
             vec!["check", "--", "--all-targets"],

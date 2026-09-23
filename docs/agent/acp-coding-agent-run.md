@@ -27,13 +27,10 @@ an ACP JSON-RPC tunnel.
 
 The Runner owns an `[acp]` / `[[acp.agents]]` startup configuration. Each agent
 entry supplies a logical id/name, executable, argv, explicit `env_from_env`
-mappings, an operator ceiling for run-level ACP config option ids, and optional
-Runner-local `forced_config` values. Forced config is administrator policy: it
-is never caller authority, cannot be overridden remotely, and must be verified
-against the live ACP session before prompt dispatch. There is no production
-`codex-acp` default. The provider child is always spawned after `env_clear()` and
-receives only configured mappings. Missing source variables fail before
-provider process start.
+mappings, and an operator ceiling for run-level ACP config option ids. There is
+no production `codex-acp` default. The provider child is always spawned after
+`env_clear()` and receives only configured mappings. Missing source variables
+fail before provider process start.
 
 P1 exposes exactly three model tools: `coding_agent_start`,
 `coding_agent_observe`, and `coding_agent_cancel`. They require the independent
@@ -95,7 +92,6 @@ WebCodex owns:
 
 - exact Runner and registered Project routing;
 - provider identity and stale-provider fencing;
-- Runner-local forced ACP config policy and pre-prompt verification;
 - run admission and idempotent initiation;
 - bounded lifecycle, timeout, cancellation, and process-tree cleanup;
 - sanitized structured observation;
@@ -107,7 +103,7 @@ The ACP agent owns:
 - coding reasoning and planning;
 - its own shell/edit/tool decisions;
 - its own sandbox and approval behavior;
-- account, organization, available model/config option set, and provider policy;
+- account, organization, model, and provider policy;
 - provider-specific coding behavior.
 
 WebCodex must not turn ACP into a second implementation of WebCodex file, shell,
@@ -392,7 +388,7 @@ be treated as uncertain unless exact protocol recovery proves otherwise.
 
 ## 5. Configuration semantics
 
-### `config` omitted or `{}` means no WebCodex override
+### `config` omitted or `{}` means no caller run-level override
 
 P0 corrects an important earlier assumption. For WebCodex:
 
@@ -402,7 +398,7 @@ or
 config = {}
 ```
 
-means **send no `session/set_config_option` calls**.
+means **send no caller-requested `session/set_config_option` calls**. If the Runner has a non-empty `[acp.forced_config]` policy, the Runner may still send `session/set_config_option` calls to enforce that operator-owned policy before prompt dispatch.
 
 It does not mean "the ACP adapter behaves exactly like a bare local Codex CLI".
 The adapter itself may have defaults. In real dogfood, `codex-acp 1.6.2`
@@ -411,8 +407,7 @@ WebCodex override.
 
 Therefore the precise inheritance contract is:
 
-> WebCodex inherits the selected Runner-owned ACP provider's effective defaults
-> by abstaining from run-level ACP config overrides.
+> Without Runner-global forced policy, WebCodex inherits the selected Runner-owned ACP provider's effective defaults by abstaining from caller run-level ACP config overrides. A configured global forced policy is operator-owned policy and is enforced separately.
 
 The Run should record a bounded sanitized snapshot of the effective advertised
 config ids/current values needed for diagnosis. It must not claim that those
@@ -448,7 +443,6 @@ concrete need rather than pretending P1 already has per-value policy.
 
 - executable or argv;
 - arbitrary environment or secret/API-key material;
-- Runner `forced_config` policy or values;
 - arbitrary cwd;
 - transport selection;
 - raw ACP JSON-RPC method/params/id;
@@ -480,35 +474,6 @@ args = []
 # Explicit operator mappings only. Values never go to the Server.
 HTTPS_PROXY = "HTTPS_PROXY"
 ```
-
-Operators may also enforce live ACP config values locally:
-
-```toml
-[[acp.agents]]
-id = "codex"
-name = "Codex"
-executable = "/runner/owned/path/to/codex-acp"
-args = []
-allowed_config_options = ["mode", "collaboration_mode", "fast-mode"]
-
-[acp.agents.forced_config]
-model = "gpt-6-luna"
-reasoning_effort = "max"
-```
-
-`forced_config` is Runner-owned administrator policy. A key cannot also appear
-in `allowed_config_options`. Remote `coding_agent_start` input may repeat the
-exact forced value, but a conflicting value fails before `session/prompt`.
-Forced values currently support the ACP stable-v1 string/select and boolean
-forms; integer values are rejected at Runner config validation.
-
-After `session/new`, the Runner validates each forced key/value against the
-provider's live advertised config options, explicitly applies each forced value,
-applies separately allowed caller overrides, then re-asserts any drifted value and
-verifies every forced value immediately before the prompt-dispatch path. Missing
-options, unsupported values, failed `session/set_config_option` calls, or values
-not reflected by the provider fail closed with `execution_state=not_started`;
-WebCodex does not fall back to another model or reasoning setting.
 
 The exact executable example is operator-specific; WebCodex must not prescribe
 `npx -y` as a production default or download packages at request time.
@@ -1058,3 +1023,36 @@ The P0 architecture baseline is therefore:
     prompt/reasoning/tool bodies out of ordinary durable telemetry/audit.
 14. P1 is one exact Codex vertical slice with typed closed Server<->Runner
     protocol and three eventual model tools, not a generic agent framework.
+
+
+## Runner-global forced ACP configuration
+
+Runner configuration may define a provider-neutral global forced policy:
+
+    [acp.forced_config]
+    model = "provider-model"
+    feature_flag = true
+
+The map is empty by default. Keys and values are provider-defined live ACP
+configuration, not WebCodex model or effort enums.
+
+This policy is admission policy, not best-effort configuration. For every new
+ACP session the Runner validates every forced key/value against that session's
+live session/new configOptions, applies it with session/set_config_option, and
+requires the returned configuration state to reflect the requested value. A
+globally forced key may not also appear in any provider's
+allowed_config_options.
+
+A caller may repeat the exact forced value. A conflicting caller value fails
+closed before session/prompt. After caller-allowed options are applied, the
+Runner re-checks and re-asserts forced values in case another setting changed
+them as a provider-side effect, then performs one final forced-current check
+immediately before the prompt-dispatch path.
+
+The policy applies to every configured ACP provider on the Runner. If a provider
+does not advertise a forced key/value, a Run targeting that provider fails
+before prompt dispatch; the policy is never silently ignored for that provider.
+
+The first version accepts stable ACP string/select and boolean values. Integer
+forced values are rejected. The ACP section remains Runner
+startup/restart-owned; forced-policy changes do not hot-reload.

@@ -375,6 +375,7 @@ async fn register_agent_projects_for_auth(
                     RunnerCapabilities {
                         shell: true,
                         explicit_shell_selection: false,
+                        bash_login_shell: false,
                         file_read: true,
                         file_write: true,
                         artifact_export_chunk_read: false,
@@ -397,6 +398,7 @@ async fn register_agent_projects_for_auth(
                         structured_cargo_test_count_assertion: true,
                         structured_cargo_test_execution_policy: true,
                         structured_cargo_test_lib: true,
+                        structured_cargo_check_packages: true,
                         structured_go_test_json: true,
                         structured_go_test_tool: true,
                         structured_go_test_packages: true,
@@ -404,6 +406,7 @@ async fn register_agent_projects_for_auth(
                         structured_script_payload: false,
                         structured_script_javascript: false,
                         structured_script_typescript: false,
+                        structured_script_python: false,
                         internal_posix_script: false,
                         structured_execution_jobs: false,
                         detached_process_jobs: false,
@@ -1107,6 +1110,7 @@ async fn repository_knowledge_association_revalidates_identity_availability_and_
             runtime
                 .dispatch_with_auth(
                     ToolCall::RunShell {
+                        login: false,
                         project: target_id,
                         command: "pwd".to_string(),
                         session_id: None,
@@ -1305,6 +1309,7 @@ async fn replacement_runner_pending_inventory_has_zero_project_routing_authority
 
     let pending_calls = vec![
         ToolCall::RunShell {
+            login: false,
             project: project_id.clone(),
             command: "pwd".to_string(),
             session_id: None,
@@ -1390,6 +1395,7 @@ async fn replacement_runner_pending_inventory_has_zero_project_routing_authority
             runtime
                 .dispatch_with_auth(
                     ToolCall::RunShell {
+                        login: false,
                         project: project_id,
                         command: "pwd".to_string(),
                         session_id: None,
@@ -1474,6 +1480,7 @@ async fn replacement_runner_removed_project_never_inherits_old_authority() {
         let result = runtime
             .dispatch_with_auth(
                 ToolCall::RunShell {
+                    login: false,
                     project: project_id.clone(),
                     command: "pwd".to_string(),
                     session_id: None,
@@ -1733,6 +1740,7 @@ async fn unique_short_agent_project_id_is_resolved_by_runtime_surface() {
             runtime
                 .dispatch_with_auth(
                     ToolCall::RunShell {
+                        login: false,
                         project: "agent-proj".to_string(),
                         command: "echo hi".to_string(),
                         session_id: None,
@@ -1804,6 +1812,7 @@ async fn runner_capability_rejection_matrix_names_required_capability() {
         let project = agent_test_project_id(client_id);
         let call = match case {
             CapabilityCase::RunShell => ToolCall::RunShell {
+                login: false,
                 project,
                 command: "echo hi".to_string(),
                 session_id: None,
@@ -1841,6 +1850,7 @@ async fn runner_tool_unknown_client_returns_unknown_project_error() {
     let result = runtime
         .dispatch_with_auth(
             ToolCall::RunShell {
+                login: false,
                 project: agent_test_project_id("ghost"),
                 command: "echo hi".to_string(),
                 session_id: None,

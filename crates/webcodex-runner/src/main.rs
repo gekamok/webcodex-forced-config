@@ -160,6 +160,13 @@ where
         .collect();
     if args.len() == 1 {
         match args[0].as_str() {
+            "--build-info-json" => {
+                return Ok(RunnerCliAction::Exit {
+                    code: 0,
+                    stdout: build_info::build_info_json("webcodex-runner"),
+                    stderr: String::new(),
+                });
+            }
             "--help" | "-h" => {
                 return Ok(RunnerCliAction::Exit {
                     code: 0,
@@ -1405,6 +1412,7 @@ fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabilities {
     // This binary accepts a structured local sh/bash selector on raw shell
     // requests. Older Runners omit the bit so current Servers fail closed.
     capabilities.explicit_shell_selection = true;
+    capabilities.bash_login_shell = true;
     capabilities.jobs = true;
     capabilities.file_read = true;
     capabilities.file_write = true;
@@ -1460,6 +1468,9 @@ fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabilities {
     // `--lib` expands the older structured Cargo test argv vocabulary, so
     // advertise it separately for mixed Server/Runner rolling upgrades.
     capabilities.structured_cargo_test_lib = true;
+    // Repeated `-p` selectors expand the older single-package Cargo check argv
+    // vocabulary, so advertise this independently for rolling upgrades.
+    capabilities.structured_cargo_check_packages = true;
     // This binary accepts both legacy Go validation argv from old Servers and
     // the current machine-readable JSON argv. Do not trust static config or
     // infer this from generic structured validation support.
@@ -1482,6 +1493,7 @@ fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabilities {
     // JavaScript. This bit means the binary understands the semantic protocol;
     // local Node availability/version is resolved only when execution starts.
     capabilities.structured_script_typescript = true;
+    capabilities.structured_script_python = true;
     capabilities.internal_posix_script = true;
     capabilities.structured_execution_jobs = true;
     // Detached process ownership is an independent additive authority. Until

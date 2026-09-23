@@ -117,25 +117,10 @@ allow_cwd_anywhere = false
 max_timeout_secs = 3600
 max_output_bytes = 262144
 
-# Optional ACP coding-agent providers. The whole [acp] section is
-# startup/restart-owned; changes require a Runner restart.
-# [acp]
-# max_concurrent_runs = 1
-#
-# Runner-global policy. This fork defaults to GPT-6 Luna + max when omitted.
+
+# Optional Runner-global ACP admission policy. Empty/omitted is the default.
+# Values must be advertised by every provider session that is expected to run
+# under this Runner. Unsupported providers fail closed before session/prompt.
 # [acp.forced_config]
-# model = "gpt-6-luna"
-# reasoning_effort = "max"
-#
-# [[acp.agents]]
-# id = "codex"
-# name = "Codex"
-# executable = "/absolute/path/to/codex-acp"
-# args = []
-# # Remote callers may change only these live provider options.
-# allowed_config_options = ["mode", "collaboration_mode", "fast-mode"]
-#
-# Optional provider-specific compatibility policy remains supported.
-# The Runner-global acp.forced_config wins on duplicate keys.
-# [acp.agents.forced_config]
-# mode = "read-only"
+# model = "provider-model"
+# feature_flag = true

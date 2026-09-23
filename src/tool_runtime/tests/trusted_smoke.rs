@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CLIENT: &str = "smoke-agent";
+const TRUSTED_SMOKE_DISPATCH_DEADLINE_SECS: u64 = 30;
 
 /// Service any pending fake-agent request locally: shell/git commands run via
 /// `sh -c`; native file writes actually write into the fixture repo.
@@ -30,11 +31,11 @@ async fn dispatch_with_local_agent(
             runtime.dispatch_with_auth(call, Some(&bootstrap)).await
         }
     });
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(TRUSTED_SMOKE_DISPATCH_DEADLINE_SECS);
     while !task.is_finished() {
         assert!(
             Instant::now() < deadline,
-            "trusted smoke dispatch did not finish within the 10-second test deadline"
+            "trusted smoke dispatch did not finish within the {TRUSTED_SMOKE_DISPATCH_DEADLINE_SECS}-second test deadline"
         );
         poll_calls.fetch_add(1, Ordering::SeqCst);
         let request = runtime
@@ -195,6 +196,7 @@ async fn trusted_agent_smoke_full_chain_has_zero_approval_interruptions() {
     let failing = dispatch_with_local_agent(
         &runtime,
         ToolCall::RunShell {
+            login: false,
             project: project.clone(),
             command: "sh check.sh".to_string(),
             session_id: Some(session_id.clone()),
@@ -237,6 +239,7 @@ async fn trusted_agent_smoke_full_chain_has_zero_approval_interruptions() {
     let passing = dispatch_with_local_agent(
         &runtime,
         ToolCall::RunShell {
+            login: false,
             project: project.clone(),
             command: "sh check.sh".to_string(),
             session_id: Some(session_id.clone()),

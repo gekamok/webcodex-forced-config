@@ -5,7 +5,7 @@ use super::*;
 use crate::coding_agents::{conflict, CodingAgentProfile, CodingAgentStore};
 use std::collections::BTreeSet;
 use toml_edit::{InlineTable, TableLike, Value};
-use webcodex_core::coding_agent::{CodingAgentConfigValue, CODING_AGENT_MAX_PROVIDERS};
+use webcodex_core::coding_agent::CODING_AGENT_MAX_PROVIDERS;
 
 const OWNER_KEY: &str = "desktop_owner";
 
@@ -149,19 +149,6 @@ fn reconcile_document(doc: &mut DocumentMut, store: &CodingAgentStore) -> Deskto
             "permission_timeout_secs",
             (settings.permission_timeout_secs as i64).into(),
         );
-        let mut forced = InlineTable::new();
-        for (key, value) in &settings.forced_config {
-            match value {
-                CodingAgentConfigValue::String(value) => {
-                    forced.insert(key, Value::from(value.as_str()));
-                }
-                CodingAgentConfigValue::Bool(value) => {
-                    forced.insert(key, Value::from(*value));
-                }
-                CodingAgentConfigValue::Integer(_) => return Err(error()),
-            }
-        }
-        set(acp, "forced_config", forced.into());
     }
     Ok(())
 }
@@ -196,19 +183,6 @@ fn patch(
             .collect::<Array>()
             .into(),
     );
-    let mut forced = InlineTable::new();
-    for (key, value) in &profile.forced_config {
-        match value {
-            CodingAgentConfigValue::String(value) => {
-                forced.insert(key, Value::from(value.as_str()));
-            }
-            CodingAgentConfigValue::Bool(value) => {
-                forced.insert(key, Value::from(*value));
-            }
-            CodingAgentConfigValue::Integer(_) => return Err(error()),
-        }
-    }
-    set(table, "forced_config", forced.into());
     set(table, OWNER_KEY, owner.into());
     Ok(())
 }
