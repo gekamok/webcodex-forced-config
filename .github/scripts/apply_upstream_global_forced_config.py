@@ -645,6 +645,21 @@ text = read(p)
 marker = '''    #[cfg(unix)]
     fn run_scenario('''
 helpers = r'''    #[cfg(unix)]
+    fn received_config_ids(log: &[Value]) -> Vec<String> {
+        log.iter()
+            .filter_map(|entry| {
+                let recv = entry.get("recv")?;
+                if recv.get("method").and_then(Value::as_str) != Some("session/set_config_option") {
+                    return None;
+                }
+                recv.pointer("/params/configId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
     fn force_policy(cfg: &mut AcpConfig) {
         cfg.forced_config = BTreeMap::from([
             (
