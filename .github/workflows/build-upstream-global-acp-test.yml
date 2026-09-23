@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/build-upstream-global-acp-test.yml"
+      - ".github/scripts/apply_upstream_global_forced_config.py"
 
 permissions:
   contents: write
@@ -62,6 +63,7 @@ jobs:
           allowed = {
               "crates/webcodex-runner/src/webcodex_runner/config.rs",
               "crates/webcodex-runner/src/webcodex_runner/coding_agent.rs",
+              "crates/webcodex-tool-contracts/src/tool_call.rs",
               "docs/agent/acp-coding-agent-run.md",
               "deploy/webcodex-runner.toml.example",
           }
@@ -81,6 +83,9 @@ jobs:
       - name: Check Runner
         run: cargo check --locked -p webcodex-runner
 
+      - name: Check tool contracts
+        run: cargo check --locked -p webcodex-tool-contracts
+
       - name: Test global forced policy
         shell: bash
         run: |
@@ -97,7 +102,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add crates/webcodex-runner/src/webcodex_runner/config.rs crates/webcodex-runner/src/webcodex_runner/coding_agent.rs docs/agent/acp-coding-agent-run.md deploy/webcodex-runner.toml.example
+          git add crates/webcodex-runner/src/webcodex_runner/config.rs crates/webcodex-runner/src/webcodex_runner/coding_agent.rs crates/webcodex-tool-contracts/src/tool_call.rs docs/agent/acp-coding-agent-run.md deploy/webcodex-runner.toml.example
           git commit -m "feat(acp): add Runner-global forced config"
           clean_sha="$(git rev-parse HEAD)"
           git diff --binary "$UPSTREAM_SHA" "$clean_sha" > "$RUNNER_TEMP/global-acp.patch"
@@ -265,3 +270,6 @@ jobs:
 # retry-test-branch
 
 # refresh-latest-upstream-20260923
+
+
+# final-pr-quality-refresh-20260923
