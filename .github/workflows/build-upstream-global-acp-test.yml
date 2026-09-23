@@ -89,25 +89,46 @@ jobs:
           cargo test --locked -p webcodex-runner global_forced_config
           cargo test --locked -p webcodex-runner multi_provider_admission_policy
 
-      - name: Commit and push clean feature branch
+      - name: Commit tested clean patch and publish test branch
         id: final
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add crates/webcodex-runner/src/webcodex_runner/config.rs crates/webcodex-runner/src/webcodex_runner/coding_agent.rs docs/agent/acp-coding-agent-run.md deploy/webcodex-runner.toml.example
           git commit -m "feat(acp): add Runner-global forced config"
-          git push origin HEAD:refs/heads/upstream/global-acp-forced-config
-          sha="$(git rev-parse HEAD)"
-          short="$(git rev-parse --short=12 HEAD)"
+          clean_sha="$(git rev-parse HEAD)"
+          git diff --binary "$UPSTREAM_SHA" "$clean_sha" > "$RUNNER_TEMP/global-acp.patch"
+
+          # This repository is not a native GitHub fork, so GITHUB_TOKEN cannot
+          # push upstream commits that changed workflow files. Build a test-only
+          # branch on origin/main whose source tree matches upstream+feature
+          # everywhere except .github/workflows, which remains fork-owned.
+          git switch -C test/upstream-global-acp-forced-config origin/main
+          git read-tree --reset -u "$UPSTREAM_SHA"
+          rm -rf .github/workflows
+          git checkout origin/main -- .github/workflows
+          git apply "$RUNNER_TEMP/global-acp.patch"
+          git add -A
+          git commit -m "test: upstream global ACP policy candidate"
+
+          test_sha="$(git rev-parse HEAD)"
+          git diff --exit-code "$clean_sha" "$test_sha" -- . ':(exclude).github/workflows'
+          git diff --exit-code origin/main "$test_sha" -- .github/workflows
+
+          git push --force-with-lease origin HEAD:refs/heads/test/upstream-global-acp-forced-config
+
+          sha="$test_sha"
+          short="$(git rev-parse --short=12 "$test_sha")"
           version="$(node -e "console.log(require('./npm/webcodex/package.json').version)")"
           {
             echo "sha=$sha"
             echo "short=$short"
             echo "version=$version"
             echo "upstream_sha=$UPSTREAM_SHA"
-            echo "branch=upstream/global-acp-forced-config"
+            echo "branch=test/upstream-global-acp-forced-config"
           } >> "$GITHUB_OUTPUT"
 
   windows:
@@ -240,3 +261,5 @@ jobs:
 # retry-2
 
 # retry-after-seeding-upstream-base
+
+# retry-test-branch
