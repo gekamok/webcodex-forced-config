@@ -1024,3 +1024,36 @@ The P0 architecture baseline is therefore:
     prompt/reasoning/tool bodies out of ordinary durable telemetry/audit.
 14. P1 is one exact Codex vertical slice with typed closed Server<->Runner
     protocol and three eventual model tools, not a generic agent framework.
+
+
+## Runner-global forced ACP configuration
+
+Runner configuration may define a provider-neutral global forced policy:
+
+    [acp.forced_config]
+    model = "provider-model"
+    feature_flag = true
+
+The map is empty by default. Keys and values are provider-defined live ACP
+configuration, not WebCodex model or effort enums.
+
+This policy is admission policy, not best-effort configuration. For every new
+ACP session the Runner validates every forced key/value against that session's
+live session/new configOptions, applies it with session/set_config_option, and
+requires the returned configuration state to reflect the requested value. A
+globally forced key may not also appear in any provider's
+allowed_config_options.
+
+A caller may repeat the exact forced value. A conflicting caller value fails
+closed before session/prompt. After caller-allowed options are applied, the
+Runner re-checks and re-asserts forced values in case another setting changed
+them as a provider-side effect, then performs one final forced-current check
+immediately before the prompt-dispatch path.
+
+The policy applies to every configured ACP provider on the Runner. If a provider
+does not advertise a forced key/value, a Run targeting that provider fails
+before prompt dispatch; the policy is never silently ignored for that provider.
+
+The first version accepts stable ACP string/select and boolean values. Integer
+forced values are rejected. The ACP section remains Runner
+startup/restart-owned; forced-policy changes do not hot-reload.
