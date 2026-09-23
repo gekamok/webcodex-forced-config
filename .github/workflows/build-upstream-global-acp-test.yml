@@ -15,11 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
-      sha: \${{ steps.final.outputs.sha }}
-      short: \${{ steps.final.outputs.short }}
-      version: \${{ steps.final.outputs.version }}
-      upstream_sha: \${{ steps.final.outputs.upstream_sha }}
-      branch: \${{ steps.final.outputs.branch }}
+      sha: ${{ steps.final.outputs.sha }}
+      short: ${{ steps.final.outputs.short }}
+      version: ${{ steps.final.outputs.version }}
+      upstream_sha: ${{ steps.final.outputs.upstream_sha }}
+      branch: ${{ steps.final.outputs.branch }}
     steps:
       - name: Checkout fork control branch
         uses: actions/checkout@v4
@@ -137,12 +137,12 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     outputs:
-      installer_name: \${{ steps.installer.outputs.name }}
+      installer_name: ${{ steps.installer.outputs.name }}
     steps:
       - name: Checkout tested feature commit
         uses: actions/checkout@v4
         with:
-          ref: \${{ needs.prepare.outputs.sha }}
+          ref: ${{ needs.prepare.outputs.sha }}
           fetch-depth: 0
 
       - name: Install Rust
@@ -190,7 +190,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $stage = Join-Path $env:RUNNER_TEMP "webcodex-upstream-global-acp-test"
-          & .\scripts\prepare_desktop_bundle.ps1 -BinDir "target\dogfood" -Version "\${{ steps.runtime.outputs.version }}" -SourceSha "\${{ steps.runtime.outputs.source }}" -BuiltAt ([Int64]"\${{ steps.runtime.outputs.built_at }}") -OutputDir $stage
+          & .\scripts\prepare_desktop_bundle.ps1 -BinDir "target\dogfood" -Version "${{ steps.runtime.outputs.version }}" -SourceSha "${{ steps.runtime.outputs.source }}" -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") -OutputDir $stage
           "config=$(Join-Path $stage 'tauri.bundle.conf.json')" >> $env:GITHUB_OUTPUT
 
       - name: Build Windows installer
@@ -200,14 +200,14 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE "target\desktop-upstream-global-acp"
-          npm exec tauri -- build --bundles nsis --config "\${{ steps.bundle.outputs.config }}" --ci --no-sign -- --locked
+          npm exec tauri -- build --bundles nsis --config "${{ steps.bundle.outputs.config }}" --ci --no-sign -- --locked
           if ($LASTEXITCODE -ne 0) { throw "Tauri NSIS build failed" }
           $bundleDir = Join-Path $env:CARGO_TARGET_DIR "release\bundle\nsis"
           $built = @(Get-ChildItem -LiteralPath $bundleDir -Filter "*-setup.exe" -File)
           if ($built.Count -ne 1) { throw "Expected exactly one installer, found $($built.Count)" }
           $dist = Join-Path $env:GITHUB_WORKSPACE "target\desktop-dist"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
-          $name = "webcodex-desktop-\${{ needs.prepare.outputs.short }}-v\${{ needs.prepare.outputs.version }}-upstream-global-acp-test-win32-x64-setup.exe"
+          $name = "webcodex-desktop-${{ needs.prepare.outputs.short }}-v${{ needs.prepare.outputs.version }}-upstream-global-acp-test-win32-x64-setup.exe"
           $installer = Join-Path $dist $name
           Copy-Item -LiteralPath $built[0].FullName -Destination $installer
           "path=$installer" >> $env:GITHUB_OUTPUT
@@ -217,13 +217,13 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          & .\scripts\desktop_install_windows_smoke.ps1 -Installer "\${{ steps.installer.outputs.path }}" -Version "\${{ needs.prepare.outputs.version }}" -SourceSha "\${{ needs.prepare.outputs.sha }}" -BuiltAt ([Int64]"\${{ steps.runtime.outputs.built_at }}") -Platform win32-x64
+          & .\scripts\desktop_install_windows_smoke.ps1 -Installer "${{ steps.installer.outputs.path }}" -Version "${{ needs.prepare.outputs.version }}" -SourceSha "${{ needs.prepare.outputs.sha }}" -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") -Platform win32-x64
 
       - name: Upload test installer
         uses: actions/upload-artifact@v4
         with:
           name: upstream-global-acp-test-win32-x64
-          path: \${{ steps.installer.outputs.path }}
+          path: ${{ steps.installer.outputs.path }}
           if-no-files-found: error
           retention-days: 14
 
@@ -244,16 +244,16 @@ jobs:
       - name: Create prerelease
         shell: bash
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="v\${{ needs.prepare.outputs.version }}-global-acp-test.\${{ needs.prepare.outputs.short }}"
-          title="Global ACP forced_config test \${{ needs.prepare.outputs.short }}"
-          body="Test build from yyjeqhc/webcodex upstream main \${{ needs.prepare.outputs.upstream_sha }} plus the generic Runner-global forced_config implementation requested in upstream issue #635. This prerelease is for local validation before opening the upstream PR."
+          tag="v${{ needs.prepare.outputs.version }}-global-acp-test.${{ needs.prepare.outputs.short }}"
+          title="Global ACP forced_config test ${{ needs.prepare.outputs.short }}"
+          body="Test build from yyjeqhc/webcodex upstream main ${{ needs.prepare.outputs.upstream_sha }} plus the generic Runner-global forced_config implementation requested in upstream issue #635. This prerelease is for local validation before opening the upstream PR."
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" release-assets/*.exe --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$tag" release-assets/*.exe --repo "$GITHUB_REPOSITORY" --target "\${{ needs.prepare.outputs.sha }}" --title "$title" --notes "$body" --prerelease
+            gh release create "$tag" release-assets/*.exe --repo "$GITHUB_REPOSITORY" --target "${{ needs.prepare.outputs.sha }}" --title "$title" --notes "$body" --prerelease
           fi
 
 # retry-1
