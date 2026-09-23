@@ -1,0 +1,236 @@
+name: Build upstream global ACP policy test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-upstream-global-acp-test.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare clean upstream branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      sha: \${{ steps.final.outputs.sha }}
+      short: \${{ steps.final.outputs.short }}
+      version: \${{ steps.final.outputs.version }}
+      upstream_sha: \${{ steps.final.outputs.upstream_sha }}
+      branch: \${{ steps.final.outputs.branch }}
+    steps:
+      - name: Checkout fork control branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Preserve patcher
+        shell: bash
+        run: cp .github/scripts/apply_upstream_global_forced_config.py "$RUNNER_TEMP/apply_upstream_global_forced_config.py"
+
+      - name: Fetch latest upstream main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/yyjeqhc/webcodex.git
+          git fetch --no-tags upstream main
+          echo "UPSTREAM_SHA=$(git rev-parse upstream/main)" >> "$GITHUB_ENV"
+
+      - name: Create clean feature branch from upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          git switch -C upstream/global-acp-forced-config upstream/main
+          test "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"
+          python3 "$RUNNER_TEMP/apply_upstream_global_forced_config.py"
+          cargo fmt
+          git diff --check
+
+      - name: Verify focused diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              "crates/webcodex-runner/src/webcodex_runner/config.rs",
+              "crates/webcodex-runner/src/webcodex_runner/coding_agent.rs",
+              "docs/agent/acp-coding-agent-run.md",
+              "deploy/webcodex-runner.toml.example",
+          }
+          changed = set(subprocess.check_output(["git","diff","--name-only"], text=True).split())
+          extra = changed - allowed
+          missing = {
+              "crates/webcodex-runner/src/webcodex_runner/config.rs",
+              "crates/webcodex-runner/src/webcodex_runner/coding_agent.rs",
+          } - changed
+          if extra or missing:
+              raise SystemExit(f"unexpected diff: changed={sorted(changed)} extra={sorted(extra)} missing={sorted(missing)}")
+          print("focused diff:", *sorted(changed), sep="\n- ")
+          PY
+          ! grep -R "gpt-6-luna" crates/webcodex-runner/src/webcodex_runner/config.rs crates/webcodex-runner/src/webcodex_runner/coding_agent.rs docs/agent/acp-coding-agent-run.md deploy/webcodex-runner.toml.example
+          ! grep -R "acp.agents.forced_config" docs/agent/acp-coding-agent-run.md deploy/webcodex-runner.toml.example
+
+      - name: Check Runner
+        run: cargo check --locked -p webcodex-runner
+
+      - name: Test global forced policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p webcodex-runner forced_config
+          cargo test --locked -p webcodex-runner global_forced_config
+          cargo test --locked -p webcodex-runner multi_provider_admission_policy
+
+      - name: Commit and push clean feature branch
+        id: final
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/webcodex-runner/src/webcodex_runner/config.rs crates/webcodex-runner/src/webcodex_runner/coding_agent.rs docs/agent/acp-coding-agent-run.md deploy/webcodex-runner.toml.example
+          git commit -m "feat(acp): add Runner-global forced config"
+          git push origin HEAD:refs/heads/upstream/global-acp-forced-config
+          sha="$(git rev-parse HEAD)"
+          short="$(git rev-parse --short=12 HEAD)"
+          version="$(node -e "console.log(require('./npm/webcodex/package.json').version)")"
+          {
+            echo "sha=$sha"
+            echo "short=$short"
+            echo "version=$version"
+            echo "upstream_sha=$UPSTREAM_SHA"
+            echo "branch=upstream/global-acp-forced-config"
+          } >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: Windows x64 test installer
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+    outputs:
+      installer_name: \${{ steps.installer.outputs.name }}
+    steps:
+      - name: Checkout tested feature commit
+        uses: actions/checkout@v4
+        with:
+          ref: \${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: upstream-global-acp-test-windows
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            apps/desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        run: |
+          npm ci --prefix frontend
+          npm ci --prefix apps/desktop
+
+      - name: Build exact Runtime
+        id: runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = (git rev-parse HEAD).Trim()
+          $short = (git rev-parse --short=12 HEAD).Trim()
+          $version = (node -e "console.log(require('./npm/webcodex/package.json').version)").Trim()
+          $builtAt = [Int64]((git show -s --format=%ct HEAD).Trim())
+          $env:WEBCODEX_BUILT_AT = "$builtAt"
+          cargo build --locked --profile dogfood -p webcodex -p webcodex-cli -p webcodex-runner
+          if ($LASTEXITCODE -ne 0) { throw "Runtime build failed" }
+          "source=$source" >> $env:GITHUB_OUTPUT
+          "short=$short" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "built_at=$builtAt" >> $env:GITHUB_OUTPUT
+
+      - name: Stage Desktop Runtime
+        id: bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = Join-Path $env:RUNNER_TEMP "webcodex-upstream-global-acp-test"
+          & .\scripts\prepare_desktop_bundle.ps1 -BinDir "target\dogfood" -Version "\${{ steps.runtime.outputs.version }}" -SourceSha "\${{ steps.runtime.outputs.source }}" -BuiltAt ([Int64]"\${{ steps.runtime.outputs.built_at }}") -OutputDir $stage
+          "config=$(Join-Path $stage 'tauri.bundle.conf.json')" >> $env:GITHUB_OUTPUT
+
+      - name: Build Windows installer
+        id: installer
+        working-directory: apps/desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE "target\desktop-upstream-global-acp"
+          npm exec tauri -- build --bundles nsis --config "\${{ steps.bundle.outputs.config }}" --ci --no-sign -- --locked
+          if ($LASTEXITCODE -ne 0) { throw "Tauri NSIS build failed" }
+          $bundleDir = Join-Path $env:CARGO_TARGET_DIR "release\bundle\nsis"
+          $built = @(Get-ChildItem -LiteralPath $bundleDir -Filter "*-setup.exe" -File)
+          if ($built.Count -ne 1) { throw "Expected exactly one installer, found $($built.Count)" }
+          $dist = Join-Path $env:GITHUB_WORKSPACE "target\desktop-dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $name = "webcodex-desktop-\${{ needs.prepare.outputs.short }}-v\${{ needs.prepare.outputs.version }}-upstream-global-acp-test-win32-x64-setup.exe"
+          $installer = Join-Path $dist $name
+          Copy-Item -LiteralPath $built[0].FullName -Destination $installer
+          "path=$installer" >> $env:GITHUB_OUTPUT
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Smoke Windows installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\scripts\desktop_install_windows_smoke.ps1 -Installer "\${{ steps.installer.outputs.path }}" -Version "\${{ needs.prepare.outputs.version }}" -SourceSha "\${{ needs.prepare.outputs.sha }}" -BuiltAt ([Int64]"\${{ steps.runtime.outputs.built_at }}") -Platform win32-x64
+
+      - name: Upload test installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-global-acp-test-win32-x64
+          path: \${{ steps.installer.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish test prerelease
+    needs: [prepare, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download test installer
+        uses: actions/download-artifact@v4
+        with:
+          name: upstream-global-acp-test-win32-x64
+          path: release-assets
+
+      - name: Create prerelease
+        shell: bash
+        env:
+          GH_TOKEN: \${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v\${{ needs.prepare.outputs.version }}-global-acp-test.\${{ needs.prepare.outputs.short }}"
+          title="Global ACP forced_config test \${{ needs.prepare.outputs.short }}"
+          body="Test build from yyjeqhc/webcodex upstream main \${{ needs.prepare.outputs.upstream_sha }} plus the generic Runner-global forced_config implementation requested in upstream issue #635. This prerelease is for local validation before opening the upstream PR."
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/*.exe --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" release-assets/*.exe --repo "$GITHUB_REPOSITORY" --target "\${{ needs.prepare.outputs.sha }}" --title "$title" --notes "$body" --prerelease
+          fi
