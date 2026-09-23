@@ -27,7 +27,9 @@ use webcodex_core::plugin::{
     validate_provider_id as validate_plugin_provider_id,
     validate_tool_name as validate_plugin_tool_name, PLUGIN_MAX_ARGUMENT_BYTES,
 };
-use webcodex_core::runner_protocol::ShellScriptLanguage;
+use webcodex_core::runner_protocol::{
+    normalize_cargo_packages, ShellScriptLanguage, CARGO_PACKAGE_MAX_ITEMS, CARGO_VALUE_MAX_BYTES,
+};
 use webcodex_core::runtime_contract::{
     validate_project_op_path, DEFAULT_OBSERVE_JOBS_TAIL_LINES,
     GIT_DIFF_HUNKS_CONTINUATION_MAX_BYTES,
@@ -1565,6 +1567,26 @@ pub enum ToolCall {
         limit: Option<usize>,
     },
 
+    /// Record a bounded external claim without creating native execution evidence.
+    RecordExternalObservation {
+        project: String,
+        session_id: String,
+        /// SHA-256 of the adapter's local conversation identity; not an authority token.
+        #[schemars(length(min = 64, max = 64), regex(pattern = "^[0-9a-f]{64}$"))]
+        adapter_id: String,
+        /// Stable SHA-256 event identity within this adapter and exact Session.
+        #[schemars(length(min = 64, max = 64), regex(pattern = "^[0-9a-f]{64}$"))]
+        event_id: String,
+        /// Tool name only; no command, argument, output or transcript text.
+        #[schemars(length(min = 1, max = 64), regex(pattern = "^[A-Za-z0-9_.:-]+$"))]
+        observed_tool: String,
+        /// External receipt claim only. Omit when no trustworthy execution receipt is available.
+        #[serde(default)]
+        exit_code: Option<i32>,
+    },
+    /// Read external claims separately from native Session/Job evidence.
+    ListExternalObservations { project: String, session_id: String },
+
     /// Post a bounded session-local ledger message for collaboration, progress,
     /// guidance, or design discussion. This is session metadata only.
     PostSessionMessage {
@@ -1785,6 +1807,15 @@ pub enum ToolCall {
         #[schemars(range(min = 1))]
         #[serde(default)]
         limit: Option<usize>,
+    },
+
+    /// Adapter/API-only exact recovery read. Uses the canonical handoff projection
+    /// without exposing the business Session through generic recorder semantics.
+    SessionHandoffState {
+        /// Required exact runtime Project; must match the authorized Session Project.
+        project: String,
+        /// Required exact business Workflow Session id.
+        session_id: String,
     },
 
     /// Create a bounded last-known-good workspace checkpoint outside the
@@ -2522,9 +2553,17 @@ pub enum ToolCall {
         /// Feature list passed to --features.
         #[serde(default)]
         features: Option<String>,
-        /// Package passed to -p.
+        /// Legacy single workspace package passed to `-p`. Mutually exclusive
+        /// with `packages`; internally canonicalized to the same package set.
         #[serde(default)]
         package: Option<String>,
+        /// Workspace packages passed as repeated `-p` selectors in one Cargo
+        /// invocation. Mutually exclusive with `package`; order and duplicates
+        /// are canonicalized because package selection is set-like.
+        #[schemars(length(min = 1, max = CARGO_PACKAGE_MAX_ITEMS))]
+        #[schemars(inner(length(min = 1, max = CARGO_VALUE_MAX_BYTES)))]
+        #[serde(default)]
+        packages: Option<Vec<String>>,
         #[schemars(extend("default" = 600))]
         /// Total validation runtime budget in seconds (minimum 1). Values above 3600 are accepted and
         /// clamped to 3600. Short validation returns immediately; longer validation keeps the same
@@ -5147,6 +5186,45 @@ fn validate_structured_validation_sync_wait(name: &str, arguments: &Value) -> Re
     Ok(())
 }
 
+fn canonicalize_cargo_check_packages(name: &str, arguments: &mut Value) -> Result<(), String> {
+    if name != "cargo_check" {
+        return Ok(());
+    }
+    let Some(object) = arguments.as_object_mut() else {
+        return Ok(());
+    };
+    let package_present = object.get("package").is_some_and(|value| !value.is_null());
+    let packages_present = object.get("packages").is_some_and(|value| !value.is_null());
+    if package_present && packages_present {
+        return Err(
+            "invalid arguments for tool 'cargo_check': package and packages are mutually exclusive"
+                .to_string(),
+        );
+    }
+
+    let package = object.get("package").and_then(Value::as_str);
+    let packages = match object.get("packages") {
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .map(|values| values.into_iter().map(str::to_string).collect::<Vec<_>>()),
+        Some(Value::Null) | None => None,
+        Some(_) => return Ok(()), // serde reports the canonical type error.
+    };
+    if package_present && package.is_none() || packages_present && packages.is_none() {
+        return Ok(()); // serde reports the canonical item/type error.
+    }
+    let normalized = normalize_cargo_packages(package, packages.as_deref())
+        .map_err(|reason| format!("invalid arguments for tool 'cargo_check': {reason}"))?;
+    object.remove("package");
+    object.remove("packages");
+    if let Some(packages) = normalized {
+        object.insert("packages".to_string(), serde_json::json!(packages));
+    }
+    Ok(())
+}
+
 impl ToolCall {
     pub fn from_tool_name(name: &str, arguments: Value) -> Result<Self, String> {
         validate_model_facing_assertion_name(name, &arguments)?;
@@ -5198,6 +5276,7 @@ impl ToolCall {
             );
         }
         let mut arguments = strip_tool_call_expectation_metadata(arguments);
+        canonicalize_cargo_check_packages(name, &mut arguments)?;
         if name == "tool_manifest" {
             if let Some(object) = arguments.as_object_mut() {
                 if !object.contains_key("include_recommended_flows") {
@@ -5323,6 +5402,8 @@ impl ToolCall {
             Self::UpdateSessionContext { .. } => "update_session_context",
             Self::CloseSession { .. } => "close_session",
             Self::ValidationSummary { .. } => "validation_summary",
+            Self::RecordExternalObservation { .. } => "record_external_observation",
+            Self::ListExternalObservations { .. } => "list_external_observations",
             Self::PostSessionMessage { .. } => "post_session_message",
             Self::PostPeerMessage { .. } => "post_peer_message",
             Self::ListSessionMessages { .. } => "list_session_messages",
@@ -5332,6 +5413,7 @@ impl ToolCall {
             Self::CompleteSessionMessage { .. } => "complete_session_message",
             Self::SessionDiscussionSummary { .. } => "session_discussion_summary",
             Self::SessionHandoffSummary { .. } => "session_handoff_summary",
+            Self::SessionHandoffState { .. } => "session_handoff_state",
             #[cfg(feature = "workspace-checkpoints")]
             Self::WorkspaceCheckpointCreate { .. } => "workspace_checkpoint_create",
             #[cfg(feature = "workspace-checkpoints")]
@@ -5497,6 +5579,11 @@ impl ToolCall {
 
     pub fn session_id(&self) -> Option<&str> {
         match self {
+            // External-observation ingress/read carries an exact business Session
+            // that is independently re-authorized by the runtime method. Keep it
+            // out of this generic recorder projection so adapter traffic cannot
+            // become native Session evidence or consume the bounded event tail.
+            Self::RecordExternalObservation { .. } | Self::ListExternalObservations { .. } => None,
             #[cfg(feature = "experimental-code-mode")]
             Self::CodeModeExec { session_id, .. }
             | Self::CodeModeExecEffectful { session_id, .. }
@@ -5570,7 +5657,9 @@ impl ToolCall {
             // App-only presentation reads intentionally do not expose their business
             // Session through this generic recorder projection: each re-authorizes
             // and reads the exact target inside its runtime method.
-            Self::WorkResultState { .. } | Self::ChangesFileDiff { .. } => None,
+            Self::WorkResultState { .. }
+            | Self::ChangesFileDiff { .. }
+            | Self::SessionHandoffState { .. } => None,
             Self::ImportConversationFilesToProject { session_id, .. } => session_id.as_deref(),
             Self::CallHierarchy { session_id, .. } => session_id.as_deref(),
             Self::WorkOnProject { session_id, .. } => session_id.as_deref(),
@@ -5635,6 +5724,8 @@ impl ToolCall {
 
     pub fn project(&self) -> Option<&str> {
         match self {
+            Self::RecordExternalObservation { project, .. }
+            | Self::ListExternalObservations { project, .. } => Some(project),
             #[cfg(feature = "experimental-code-mode")]
             Self::CodeModeExec { project, .. }
             | Self::CodeModeExecEffectful { project, .. }
@@ -5721,6 +5812,7 @@ impl ToolCall {
             Self::UpdateSessionContext { project, .. }
             | Self::ValidationSummary { project, .. } => Some(project.as_str()),
             Self::SessionHandoffSummary { project, .. } => project.as_deref(),
+            Self::SessionHandoffState { project, .. } => Some(project.as_str()),
             _ => None,
         }
     }

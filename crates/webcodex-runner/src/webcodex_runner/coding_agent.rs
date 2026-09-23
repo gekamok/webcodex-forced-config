@@ -592,6 +592,7 @@ pub(crate) struct CodingAgentWorkerDrain {
 pub(crate) struct CodingAgentManager {
     client_id: String,
     providers: BTreeMap<String, Arc<ProviderEntry>>,
+    forced_config: BTreeMap<String, CodingAgentConfigValue>,
     max_concurrent_runs: usize,
     permission_timeout: Duration,
     store: DurableRunStore,
@@ -614,14 +615,6 @@ pub(crate) struct CodingAgentManager {
     initial_claim_writes: std::sync::atomic::AtomicUsize,
 }
 
-fn effective_provider_config(config: &AcpConfig, provider: &AcpAgentConfig) -> AcpAgentConfig {
-    let mut effective = provider.clone();
-    for (key, value) in &config.forced_config {
-        effective.forced_config.insert(key.clone(), value.clone());
-    }
-    effective
-}
-
 impl CodingAgentManager {
     pub(crate) fn new(
         config: &AcpConfig,
@@ -633,7 +626,7 @@ impl CodingAgentManager {
             providers.insert(
                 provider.id.clone(),
                 Arc::new(ProviderEntry {
-                    config: effective_provider_config(config, provider),
+                    config: provider.clone(),
                     instance_id: format!("acp_{}", Uuid::new_v4().simple()),
                 }),
             );
@@ -641,6 +634,7 @@ impl CodingAgentManager {
         let manager = Arc::new(Self {
             client_id: client_id.to_string(),
             providers,
+            forced_config: config.forced_config.clone(),
             max_concurrent_runs: config.max_concurrent_runs,
             permission_timeout: Duration::from_secs(config.permission_timeout_secs),
             store: DurableRunStore::new(DurableRunStore::default_root(client_id, server_url)?),
@@ -673,7 +667,7 @@ impl CodingAgentManager {
             providers.insert(
                 provider.id.clone(),
                 Arc::new(ProviderEntry {
-                    config: effective_provider_config(config, provider),
+                    config: provider.clone(),
                     instance_id: format!("acp_{}", Uuid::new_v4().simple()),
                 }),
             );
@@ -681,6 +675,7 @@ impl CodingAgentManager {
         let manager = Arc::new(Self {
             client_id: "test".to_string(),
             providers,
+            forced_config: config.forced_config.clone(),
             max_concurrent_runs: config.max_concurrent_runs,
             permission_timeout: Duration::from_secs(config.permission_timeout_secs),
             store: DurableRunStore::new(root),
@@ -1711,11 +1706,10 @@ impl CodingAgentManager {
         let session_id = new_session.session_id.to_string();
         let mut advertised = new_session.config_options.unwrap_or_default();
 
-        // Runner-local forced config is an operator policy, not caller input.
-        // A caller may repeat the exact forced value, but conflicting requests
-        // fail before any ACP prompt can be dispatched.
+        // Runner-owned global forced config is admission policy, not a
+        // best-effort preference. Conflicting caller input fails before prompt.
         for (key, value) in &request.config {
-            if let Some(forced_value) = provider.config.forced_config.get(key) {
+            if let Some(forced_value) = self.forced_config.get(key) {
                 if value != forced_value {
                     self.setup_failure(
                         &request.run_id,
@@ -1729,7 +1723,7 @@ impl CodingAgentManager {
             }
         }
 
-        for (key, value) in &provider.config.forced_config {
+        for (key, value) in &self.forced_config {
             if !self.apply_pre_prompt_config_option(
                 &request.run_id,
                 &entry,
@@ -1749,14 +1743,10 @@ impl CodingAgentManager {
         }
 
         for (key, value) in &request.config {
-            // An exact repetition of Runner-enforced policy was already
-            // accepted above and is not a remote override.
-            if provider.config.forced_config.contains_key(key) {
+            // Exact repetition of globally forced policy is accepted but is not
+            // a caller override and is already active.
+            if self.forced_config.contains_key(key) {
                 continue;
-            }
-            if self.pre_prompt_should_stop(&request.run_id, &entry, run_deadline) {
-                self.terminate_run_io(&mut child, &mut outbound);
-                return;
             }
             if !provider
                 .config
@@ -1791,10 +1781,9 @@ impl CodingAgentManager {
             }
         }
 
-        // A provider may change one config option as a side effect of applying
-        // another. Re-assert any forced values that drifted, then perform a
-        // final fail-closed verification immediately before the prompt path.
-        for (key, value) in &provider.config.forced_config {
+        // Caller-allowed changes may have provider-side effects on another
+        // option. Re-assert any forced value that drifted.
+        for (key, value) in &self.forced_config {
             if config_override_is_valid(&advertised, key, value)
                 && config_override_is_current(&advertised, key, value)
             {
@@ -1817,7 +1806,9 @@ impl CodingAgentManager {
                 return;
             }
         }
-        if provider.config.forced_config.iter().any(|(key, value)| {
+
+        // Final fail-closed check immediately before the prompt-dispatch path.
+        if self.forced_config.iter().any(|(key, value)| {
             !config_override_is_valid(&advertised, key, value)
                 || !config_override_is_current(&advertised, key, value)
         }) {
@@ -3121,7 +3112,6 @@ mod tests {
                 args,
                 env_from_env: BTreeMap::new(),
                 allowed_config_options: vec!["mode".to_string()],
-                forced_config: BTreeMap::new(),
             }],
         }
     }
@@ -3132,10 +3122,7 @@ mod tests {
         let script = r#"#!/usr/bin/env python3
 import json,os,sys,time,subprocess
 scenario=sys.argv[1]
-config_values={
- 'one':'a','two':'a','three':'a','four':'a',
- 'mode':'agent','model':'default-model','reasoning_effort':'medium'
-}
+config_values={'one':'a','two':'a','three':'a','four':'a','mode':'agent','model':'default-model','reasoning_effort':'medium'}
 log_path=os.path.join(os.path.dirname(__file__),'fake-acp.log')
 def log(x):
  with open(log_path,'a',encoding='utf-8') as f: f.write(json.dumps(x,separators=(',',':'))+'\n')
@@ -3160,8 +3147,8 @@ for line in sys.stdin:
   elif scenario in ('forced_configs','forced_not_applied','forced_reset_by_caller'):
    opts=[
     {'id':'mode','name':'Mode','type':'select','currentValue':config_values['mode'],'options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]},
-    {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'gpt-6-luna','name':'Luna'}]},
-    {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'max','name':'Max'}]}
+    {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'policy-model','name':'Policy'}]},
+    {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'high','name':'High'}]}
    ]
   else:
    opts=[{'id':'mode','name':'Mode','type':'select','currentValue':'agent','options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]}]
@@ -3185,8 +3172,8 @@ for line in sys.stdin:
     config_values['model']='default-model'; config_values['reasoning_effort']='medium'
    opts=[
     {'id':'mode','name':'Mode','type':'select','currentValue':config_values['mode'],'options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]},
-    {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'gpt-6-luna','name':'Luna'}]},
-    {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'max','name':'Max'}]}
+    {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'policy-model','name':'Policy'}]},
+    {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'high','name':'High'}]}
    ]
   else:
    v=m['params']['value']; opts=[{'id':'mode','name':'Mode','type':'select','currentValue':v,'options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]}]
@@ -3371,6 +3358,62 @@ for line in sys.stdin:
     }
 
     #[cfg(unix)]
+    fn received_config_ids(log: &[Value]) -> Vec<String> {
+        log.iter()
+            .filter_map(|entry| {
+                let recv = entry.get("recv")?;
+                if recv.get("method").and_then(Value::as_str) != Some("session/set_config_option") {
+                    return None;
+                }
+                recv.pointer("/params/configId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn force_policy(cfg: &mut AcpConfig) {
+        cfg.forced_config = BTreeMap::from([
+            (
+                "model".to_string(),
+                CodingAgentConfigValue::String("policy-model".to_string()),
+            ),
+            (
+                "reasoning_effort".to_string(),
+                CodingAgentConfigValue::String("high".to_string()),
+            ),
+        ]);
+    }
+
+    #[cfg(unix)]
+    fn start_request_for_provider(
+        manager: &CodingAgentManager,
+        root: &Path,
+        run: &str,
+        provider_id: &str,
+        config: BTreeMap<String, CodingAgentConfigValue>,
+    ) -> CodingAgentRequest {
+        let provider = manager
+            .providers()
+            .into_iter()
+            .find(|provider| provider.provider_id == provider_id)
+            .unwrap();
+        CodingAgentRequest::Start(webcodex_core::coding_agent::CodingAgentStartRequest {
+            run_id: run.to_string(),
+            intent_fingerprint: format!("fingerprint-{provider_id}"),
+            authority_fingerprint: "auth_test".to_string(),
+            runtime_project_id: "agent:test:demo".to_string(),
+            project_root: root.to_string_lossy().to_string(),
+            provider_id: provider_id.to_string(),
+            provider_instance_id: provider.provider_instance_id,
+            instruction: "inspect".to_string(),
+            config,
+            timeout_secs: 10,
+        })
+    }
+
+    #[cfg(unix)]
     fn run_scenario(
         scenario: &str,
         config: BTreeMap<String, CodingAgentConfigValue>,
@@ -3443,35 +3486,6 @@ for line in sys.stdin:
             .filter_map(|entry| entry.pointer("/recv/method").and_then(Value::as_str))
             .map(str::to_string)
             .collect()
-    }
-
-    #[cfg(unix)]
-    fn received_config_ids(log: &[Value]) -> Vec<String> {
-        log.iter()
-            .filter_map(|entry| {
-                let recv = entry.get("recv")?;
-                if recv.get("method").and_then(Value::as_str) != Some("session/set_config_option") {
-                    return None;
-                }
-                recv.pointer("/params/configId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect()
-    }
-
-    #[cfg(unix)]
-    fn force_luna_max(cfg: &mut AcpConfig) {
-        cfg.forced_config = BTreeMap::from([
-            (
-                "model".to_string(),
-                CodingAgentConfigValue::String("gpt-6-luna".to_string()),
-            ),
-            (
-                "reasoning_effort".to_string(),
-                CodingAgentConfigValue::String("max".to_string()),
-            ),
-        ]);
     }
 
     #[cfg(unix)]
@@ -4158,340 +4172,6 @@ for line in sys.stdin:
 
     #[test]
     #[cfg(unix)]
-    fn global_forced_config_overrides_provider_for_every_session() {
-        let temp = TempDir::new().unwrap();
-        let (exe, args) = fake_agent(&temp, "forced_configs");
-        let mut cfg = fake_config(exe, args);
-        cfg.agents[0].forced_config.insert(
-            "model".to_string(),
-            CodingAgentConfigValue::String("default-model".to_string()),
-        );
-        force_luna_max(&mut cfg);
-        let projects = project_fixture(&temp);
-        let root = temp.path().join("repo");
-        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
-        let run = "wc_agent_run_globalforced01";
-        assert!(manager
-            .handle(
-                start_request(&manager, &root, run, BTreeMap::new()),
-                &projects,
-            )
-            .error
-            .is_none());
-        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
-        assert_eq!(terminal.state, CodingAgentRunState::Completed);
-        let provider = manager.providers.values().next().unwrap();
-        assert_eq!(
-            provider.config.forced_config.get("model"),
-            Some(&CodingAgentConfigValue::String("gpt-6-luna".to_string()))
-        );
-        assert_eq!(
-            provider.config.forced_config.get("reasoning_effort"),
-            Some(&CodingAgentConfigValue::String("max".to_string()))
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn forced_config_is_applied_before_prompt() {
-        let temp = TempDir::new().unwrap();
-        let (exe, args) = fake_agent(&temp, "forced_configs");
-        let mut cfg = fake_config(exe, args);
-        force_luna_max(&mut cfg);
-        let projects = project_fixture(&temp);
-        let root = temp.path().join("repo");
-        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
-        let run = "wc_agent_run_forcedapply01";
-        assert!(manager
-            .handle(
-                start_request(&manager, &root, run, BTreeMap::new()),
-                &projects,
-            )
-            .error
-            .is_none());
-        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
-        assert_eq!(terminal.state, CodingAgentRunState::Completed);
-        let log = wire_log(&temp);
-        assert_eq!(
-            received_config_ids(&log),
-            vec!["model".to_string(), "reasoning_effort".to_string()]
-        );
-        assert_eq!(
-            received_methods(&log),
-            vec![
-                "initialize",
-                "session/new",
-                "session/set_config_option",
-                "session/set_config_option",
-                "session/prompt",
-            ]
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn missing_forced_config_fails_without_prompt() {
-        let temp = TempDir::new().unwrap();
-        let (exe, args) = fake_agent(&temp, "end");
-        let mut cfg = fake_config(exe, args);
-        cfg.agents[0].forced_config.insert(
-            "model".to_string(),
-            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
-        );
-        let projects = project_fixture(&temp);
-        let root = temp.path().join("repo");
-        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
-        let run = "wc_agent_run_forcedmissing01";
-        assert!(manager
-            .handle(
-                start_request(&manager, &root, run, BTreeMap::new()),
-                &projects,
-            )
-            .error
-            .is_none());
-        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
-        assert_eq!(terminal.state, CodingAgentRunState::Failed);
-        assert_eq!(
-            terminal.execution_state,
-            CodingAgentExecutionState::NotStarted
-        );
-        assert_eq!(
-            terminal
-                .terminal
-                .as_ref()
-                .and_then(|terminal| terminal.error_code.as_deref()),
-            Some("coding_agent_forced_config_not_advertised")
-        );
-        assert_eq!(
-            received_methods(&wire_log(&temp))
-                .iter()
-                .filter(|method| method.as_str() == "session/prompt")
-                .count(),
-            0
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn forced_config_must_be_reflected_by_provider() {
-        let temp = TempDir::new().unwrap();
-        let (exe, args) = fake_agent(&temp, "forced_not_applied");
-        let mut cfg = fake_config(exe, args);
-        cfg.agents[0].forced_config.insert(
-            "model".to_string(),
-            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
-        );
-        let projects = project_fixture(&temp);
-        let root = temp.path().join("repo");
-        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
-        let run = "wc_agent_run_forcedreflect01";
-        assert!(manager
-            .handle(
-                start_request(&manager, &root, run, BTreeMap::new()),
-                &projects,
-            )
-            .error
-            .is_none());
-        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
-        assert_eq!(terminal.state, CodingAgentRunState::Failed);
-        assert_eq!(
-            terminal
-                .terminal
-                .as_ref()
-                .and_then(|terminal| terminal.error_code.as_deref()),
-            Some("coding_agent_forced_config_not_applied")
-        );
-        assert_eq!(
-            received_methods(&wire_log(&temp))
-                .iter()
-                .filter(|method| method.as_str() == "session/prompt")
-                .count(),
-            0
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn unsupported_forced_config_value_fails_without_prompt() {
-        let temp = TempDir::new().unwrap();
-        let (exe, args) = fake_agent(&temp, "forced_configs");
-        let mut cfg = fake_config(exe, args);
-        cfg.agents[0].forced_config.insert(
-            "model".to_string(),
-            CodingAgentConfigValue::String("not-advertised-model".to_string()),
-        );
-        let projects = project_fixture(&temp);
-        let root = temp.path().join("repo");
-        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
-        let run = "wc_agent_run_forcedbadvalue01";
-        assert!(manager
-            .handle(
-                start_request(&manager, &root, run, BTreeMap::new()),
-                &projects,
-            )
-            .error
-            .is_none());
-        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
-        assert_eq!(terminal.state, CodingAgentRunState::Failed);
-        assert_eq!(
-            terminal.execution_state,
-            CodingAgentExecutionState::NotStarted
-        );
-        assert_eq!(
-            terminal
-                .terminal
-                .as_ref()
-                .and_then(|terminal| terminal.error_code.as_deref()),
-            Some("coding_agent_forced_config_invalid")
-        );
-        assert_eq!(
-            received_methods(&wire_log(&temp))
-                .iter()
-                .filter(|method| method.as_str() == "session/prompt")
-                .count(),
-            0
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn caller_may_repeat_but_not_override_forced_config() {
-        let temp = TempDir::new().unwrap();
-        let (exe, args) = fake_agent(&temp, "forced_configs");
-        let mut cfg = fake_config(exe, args);
-        cfg.agents[0].forced_config.insert(
-            "model".to_string(),
-            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
-        );
-        let projects = project_fixture(&temp);
-        let root = temp.path().join("repo");
-        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
-        let same_run = "wc_agent_run_forcedsame0001";
-        assert!(manager
-            .handle(
-                start_request(
-                    &manager,
-                    &root,
-                    same_run,
-                    BTreeMap::from([(
-                        "model".to_string(),
-                        CodingAgentConfigValue::String("gpt-6-luna".to_string()),
-                    )]),
-                ),
-                &projects,
-            )
-            .error
-            .is_none());
-        let terminal = wait_for_snapshot(&manager, same_run, |snapshot| snapshot.state.terminal());
-        assert_eq!(terminal.state, CodingAgentRunState::Completed);
-        assert_eq!(
-            received_methods(&wire_log(&temp))
-                .iter()
-                .filter(|method| method.as_str() == "session/prompt")
-                .count(),
-            1
-        );
-
-        let temp = TempDir::new().unwrap();
-        let (exe, args) = fake_agent(&temp, "forced_configs");
-        let mut cfg = fake_config(exe, args);
-        cfg.agents[0].forced_config.insert(
-            "model".to_string(),
-            CodingAgentConfigValue::String("gpt-6-luna".to_string()),
-        );
-        let projects = project_fixture(&temp);
-        let root = temp.path().join("repo");
-        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
-        let conflict_run = "wc_agent_run_forcedconflict01";
-        assert!(manager
-            .handle(
-                start_request(
-                    &manager,
-                    &root,
-                    conflict_run,
-                    BTreeMap::from([(
-                        "model".to_string(),
-                        CodingAgentConfigValue::String("default-model".to_string()),
-                    )]),
-                ),
-                &projects,
-            )
-            .error
-            .is_none());
-        let terminal =
-            wait_for_snapshot(&manager, conflict_run, |snapshot| snapshot.state.terminal());
-        assert_eq!(terminal.state, CodingAgentRunState::Failed);
-        assert_eq!(
-            terminal.execution_state,
-            CodingAgentExecutionState::NotStarted
-        );
-        assert_eq!(
-            terminal
-                .terminal
-                .as_ref()
-                .and_then(|terminal| terminal.error_code.as_deref()),
-            Some("coding_agent_forced_config_conflict")
-        );
-        let log = wire_log(&temp);
-        assert!(received_config_ids(&log).is_empty());
-        assert_eq!(
-            received_methods(&log)
-                .iter()
-                .filter(|method| method.as_str() == "session/prompt")
-                .count(),
-            0
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn forced_config_is_reasserted_after_caller_config_side_effects() {
-        let temp = TempDir::new().unwrap();
-        let (exe, args) = fake_agent(&temp, "forced_reset_by_caller");
-        let mut cfg = fake_config(exe, args);
-        force_luna_max(&mut cfg);
-        let projects = project_fixture(&temp);
-        let root = temp.path().join("repo");
-        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
-        let run = "wc_agent_run_forcedreassert01";
-        assert!(manager
-            .handle(
-                start_request(
-                    &manager,
-                    &root,
-                    run,
-                    BTreeMap::from([(
-                        "mode".to_string(),
-                        CodingAgentConfigValue::String("read-only".to_string()),
-                    )]),
-                ),
-                &projects,
-            )
-            .error
-            .is_none());
-        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
-        assert_eq!(terminal.state, CodingAgentRunState::Completed);
-        assert_eq!(
-            received_config_ids(&wire_log(&temp)),
-            vec![
-                "model".to_string(),
-                "reasoning_effort".to_string(),
-                "mode".to_string(),
-                "model".to_string(),
-                "reasoning_effort".to_string(),
-            ]
-        );
-        assert_eq!(
-            received_methods(&wire_log(&temp))
-                .iter()
-                .filter(|method| method.as_str() == "session/prompt")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
     fn cancel_permission_and_unsupported_requests_are_fail_closed() {
         let temp = TempDir::new().unwrap();
         let (exe, args) = fake_agent(&temp, "permission_hold");
@@ -4827,6 +4507,325 @@ for line in sys.stdin:
                 .filter(|m| m.as_str() == "session/prompt")
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn forced_config_is_applied_before_prompt() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_configs");
+        let mut cfg = fake_config(exe, args);
+        force_policy(&mut cfg);
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_forcedapply01";
+        assert!(manager
+            .handle(
+                start_request(&manager, &root, run, BTreeMap::new()),
+                &projects,
+            )
+            .error
+            .is_none());
+        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+        assert_eq!(terminal.state, CodingAgentRunState::Completed);
+        assert_eq!(
+            received_config_ids(&wire_log(&temp)),
+            vec!["model".to_string(), "reasoning_effort".to_string()]
+        );
+        assert_eq!(
+            received_methods(&wire_log(&temp)),
+            vec![
+                "initialize",
+                "session/new",
+                "session/set_config_option",
+                "session/set_config_option",
+                "session/prompt",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn missing_forced_config_fails_without_prompt() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "end");
+        let mut cfg = fake_config(exe, args);
+        cfg.forced_config.insert(
+            "model".to_string(),
+            CodingAgentConfigValue::String("policy-model".to_string()),
+        );
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_forcedmissing01";
+        assert!(manager
+            .handle(
+                start_request(&manager, &root, run, BTreeMap::new()),
+                &projects,
+            )
+            .error
+            .is_none());
+        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+        assert_eq!(terminal.state, CodingAgentRunState::Failed);
+        assert_eq!(
+            terminal
+                .terminal
+                .as_ref()
+                .and_then(|terminal| terminal.error_code.as_deref()),
+            Some("coding_agent_forced_config_not_advertised")
+        );
+        assert_eq!(
+            received_methods(&wire_log(&temp))
+                .iter()
+                .filter(|method| method.as_str() == "session/prompt")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn forced_config_must_be_reflected_by_provider() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_not_applied");
+        let mut cfg = fake_config(exe, args);
+        cfg.forced_config.insert(
+            "model".to_string(),
+            CodingAgentConfigValue::String("policy-model".to_string()),
+        );
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_forcedreflect01";
+        assert!(manager
+            .handle(
+                start_request(&manager, &root, run, BTreeMap::new()),
+                &projects,
+            )
+            .error
+            .is_none());
+        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+        assert_eq!(terminal.state, CodingAgentRunState::Failed);
+        assert_eq!(
+            terminal
+                .terminal
+                .as_ref()
+                .and_then(|terminal| terminal.error_code.as_deref()),
+            Some("coding_agent_forced_config_not_applied")
+        );
+        assert_eq!(
+            received_methods(&wire_log(&temp))
+                .iter()
+                .filter(|method| method.as_str() == "session/prompt")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn caller_may_repeat_but_not_override_forced_config() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_configs");
+        let mut cfg = fake_config(exe, args);
+        cfg.forced_config.insert(
+            "model".to_string(),
+            CodingAgentConfigValue::String("policy-model".to_string()),
+        );
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let same_run = "wc_agent_run_forcedsame0001";
+        assert!(manager
+            .handle(
+                start_request(
+                    &manager,
+                    &root,
+                    same_run,
+                    BTreeMap::from([(
+                        "model".to_string(),
+                        CodingAgentConfigValue::String("policy-model".to_string()),
+                    )]),
+                ),
+                &projects,
+            )
+            .error
+            .is_none());
+        assert_eq!(
+            wait_for_snapshot(&manager, same_run, |snapshot| snapshot.state.terminal()).state,
+            CodingAgentRunState::Completed
+        );
+
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_configs");
+        let mut cfg = fake_config(exe, args);
+        cfg.forced_config.insert(
+            "model".to_string(),
+            CodingAgentConfigValue::String("policy-model".to_string()),
+        );
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let conflict_run = "wc_agent_run_forcedconflict01";
+        assert!(manager
+            .handle(
+                start_request(
+                    &manager,
+                    &root,
+                    conflict_run,
+                    BTreeMap::from([(
+                        "model".to_string(),
+                        CodingAgentConfigValue::String("default-model".to_string()),
+                    )]),
+                ),
+                &projects,
+            )
+            .error
+            .is_none());
+        let terminal =
+            wait_for_snapshot(&manager, conflict_run, |snapshot| snapshot.state.terminal());
+        assert_eq!(terminal.state, CodingAgentRunState::Failed);
+        assert_eq!(
+            terminal
+                .terminal
+                .as_ref()
+                .and_then(|terminal| terminal.error_code.as_deref()),
+            Some("coding_agent_forced_config_conflict")
+        );
+        assert!(received_config_ids(&wire_log(&temp)).is_empty());
+        assert_eq!(
+            received_methods(&wire_log(&temp))
+                .iter()
+                .filter(|method| method.as_str() == "session/prompt")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn forced_config_is_reasserted_after_caller_side_effects() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_reset_by_caller");
+        let mut cfg = fake_config(exe, args);
+        force_policy(&mut cfg);
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_forcedreassert01";
+        assert!(manager
+            .handle(
+                start_request(
+                    &manager,
+                    &root,
+                    run,
+                    BTreeMap::from([(
+                        "mode".to_string(),
+                        CodingAgentConfigValue::String("read-only".to_string()),
+                    )]),
+                ),
+                &projects,
+            )
+            .error
+            .is_none());
+        assert_eq!(
+            wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal()).state,
+            CodingAgentRunState::Completed
+        );
+        assert_eq!(
+            received_config_ids(&wire_log(&temp)),
+            vec![
+                "model".to_string(),
+                "reasoning_effort".to_string(),
+                "mode".to_string(),
+                "model".to_string(),
+                "reasoning_effort".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn global_forced_config_is_multi_provider_admission_policy() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_configs");
+        let mut cfg = fake_config(exe.clone(), args);
+        cfg.forced_config.insert(
+            "model".to_string(),
+            CodingAgentConfigValue::String("policy-model".to_string()),
+        );
+        cfg.agents.push(AcpAgentConfig {
+            id: "limited".to_string(),
+            name: "Limited".to_string(),
+            executable: exe,
+            args: vec!["end".to_string()],
+            env_from_env: BTreeMap::new(),
+            allowed_config_options: vec!["mode".to_string()],
+        });
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+
+        let supported_run = "wc_agent_run_forcedmultiok";
+        assert!(manager
+            .handle(
+                start_request_for_provider(
+                    &manager,
+                    &root,
+                    supported_run,
+                    "codex",
+                    BTreeMap::new(),
+                ),
+                &projects,
+            )
+            .error
+            .is_none());
+        assert_eq!(
+            wait_for_snapshot(&manager, supported_run, |snapshot| snapshot
+                .state
+                .terminal())
+            .state,
+            CodingAgentRunState::Completed
+        );
+        let prompts_after_supported = received_methods(&wire_log(&temp))
+            .iter()
+            .filter(|method| method.as_str() == "session/prompt")
+            .count();
+        assert_eq!(prompts_after_supported, 1);
+
+        let limited_run = "wc_agent_run_forcedmultifail";
+        assert!(manager
+            .handle(
+                start_request_for_provider(
+                    &manager,
+                    &root,
+                    limited_run,
+                    "limited",
+                    BTreeMap::new(),
+                ),
+                &projects,
+            )
+            .error
+            .is_none());
+        let terminal =
+            wait_for_snapshot(&manager, limited_run, |snapshot| snapshot.state.terminal());
+        assert_eq!(terminal.state, CodingAgentRunState::Failed);
+        assert_eq!(
+            terminal
+                .terminal
+                .as_ref()
+                .and_then(|terminal| terminal.error_code.as_deref()),
+            Some("coding_agent_forced_config_not_advertised")
+        );
+        assert_eq!(
+            received_methods(&wire_log(&temp))
+                .iter()
+                .filter(|method| method.as_str() == "session/prompt")
+                .count(),
+            1,
+            "unsupported provider must fail before prompt dispatch"
         );
     }
 
@@ -5978,7 +5977,6 @@ for line in sys.stdin:
                 ],
                 env_from_env,
                 allowed_config_options: Vec::new(),
-                forced_config: BTreeMap::new(),
             }],
         };
         let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
@@ -6136,7 +6134,7 @@ for line in sys.stdin:
         let cfg = AcpConfig {
             max_concurrent_runs: manager.max_concurrent_runs,
             permission_timeout_secs: 1,
-            forced_config: BTreeMap::new(),
+            forced_config: manager.forced_config.clone(),
             agents: manager
                 .providers
                 .values()

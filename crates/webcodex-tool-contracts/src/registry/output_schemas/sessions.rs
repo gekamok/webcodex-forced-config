@@ -6,14 +6,44 @@ use webcodex_core::workflow_session_contract::{
 
 use super::common::{
     array_schema, cargo_test_count_assertion_schema, continuation_feedback_schema,
-    evidence_history_schema, evidence_integrity_schema, handoff_brief_schema,
-    job_lifecycle_summary_schema, nullable_schema, open_object_schema, permission_summary_schema,
-    schema_type, session_execution_context_schema, session_guards_schema, session_lifecycle_schema,
-    session_mode_schema, task_outcome_schema, validation_delta_schema, wrapped_output_schema,
+    evidence_history_schema, evidence_integrity_schema, external_observation_schema,
+    handoff_brief_schema, job_lifecycle_summary_schema, nullable_schema, open_object_schema,
+    permission_summary_schema, schema_type, session_execution_context_schema,
+    session_guards_schema, session_lifecycle_schema, session_mode_schema, task_outcome_schema,
+    validation_delta_schema, wrapped_output_schema,
 };
 
 pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
     match name {
+        "record_external_observation" => Some(wrapped_output_schema(vec![
+            ("session_id", schema_type("string", "Exact Workflow Session.")),
+            ("project", schema_type("string", "Exact authorized Project.")),
+            ("provenance", schema_type("string", "Always external_report; not native execution evidence.")),
+            ("inserted", schema_type("boolean", "False for an identical retained replay.")),
+            ("observation", external_observation_schema("Bounded external claim; missing exit_code produces unknown.")),
+        ])),
+        "list_external_observations" => Some(wrapped_output_schema(vec![
+            ("session_id", schema_type("string", "Exact Workflow Session.")),
+            ("project", schema_type("string", "Exact authorized Project.")),
+            ("provenance", schema_type("string", "Always external_report; not native execution evidence.")),
+            ("coverage", json!({
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Capture/ordering truth for this external-report projection. The first adapter has no durable source sequence, so completeness cannot be proven.",
+                "properties": {
+                    "complete": {"type": "boolean", "const": false},
+                    "reason": {"type": "string", "enum": ["source_sequence_unavailable"]},
+                    "ordering": {"type": "string", "enum": ["server_recorded_at_then_identity"]}
+                },
+                "required": ["complete", "reason", "ordering"]
+            })),
+            ("observations", json!({
+                "type": "array",
+                "maxItems": 256,
+                "items": external_observation_schema("Untrusted external report."),
+                "description": "At most 256 retained reports. Ordering is server recorded-at plus identity, not proven source execution order."
+            })),
+        ])),
         "start_session" => Some(wrapped_output_schema(vec![
             (
                 "success",
@@ -430,7 +460,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 ),
             ),
         ])),
-        "session_handoff_summary" => Some(wrapped_output_schema(vec![
+        "session_handoff_summary" | "session_handoff_state" => Some(wrapped_output_schema(vec![
             (
                 "diagnostic",
                 schema_type("boolean", "True only when detailed evidence was explicitly requested."),
@@ -667,7 +697,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ),
             (
                 "handoff_brief",
-                handoff_brief_schema("Compact deterministic task handoff for a new window, new Agent, or human receiver. It is a read-only projection over already-obtained Session, continuation, workspace, validation, Job, and guidance evidence; it is not Session replay and never restores hidden model context."),
+                handoff_brief_schema("Compact deterministic task handoff for a new window, new Agent, or human receiver. It includes a bounded read-only external_report section with explicit incomplete capture coverage, separate from native Session, validation, and Job evidence; it is not Session replay and never restores hidden model context."),
             ),
         ])),
         _ => None,

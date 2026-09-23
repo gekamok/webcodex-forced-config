@@ -8,7 +8,6 @@ import { useRunnerCapabilitiesText } from "../../i18n/runner-capabilities";
 import { workspaceQuery } from "../workspace/WorkspaceContext";
 import { WorkspaceDialog } from "../workspace/WorkspaceDialog";
 import { CodingAgentEditor } from "./CodingAgentEditor";
-import { CodingAgentGlobalSettingsEditor } from "./CodingAgentGlobalSettingsEditor";
 import { RunnerCapabilityAuthorization } from "./RunnerCapabilityAuthorization";
 
 export function CodingAgentsPanel({ state, onState, settings, onRestarted }: {
@@ -20,7 +19,6 @@ export function CodingAgentsPanel({ state, onState, settings, onRestarted }: {
   const [revision, setRevision] = useState(0); const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false); const [busy, setBusy] = useState(false); const submitting = useRef(false);
   const [editor, setEditor] = useState<{ profile: CodingAgentProfile | null; revision: number; target: SettingsTarget } | null>(null);
-  const [globalEditor, setGlobalEditor] = useState(false);
   const [deleting, setDeleting] = useState<{ profile: CodingAgentProfile; revision: number; target: SettingsTarget } | null>(null);
   useEffect(() => {
     let cancelled = false; setInventory(null); setLoading(true);
@@ -50,9 +48,8 @@ export function CodingAgentsPanel({ state, onState, settings, onRestarted }: {
   };
   const advertised = inventory?.connected ? inventory.coding_agent_providers ?? [] : [];
   return <div role="presentation">
-    <div className="extension-toolbar"><button type="button" className="primary-button" aria-label="Global ACP Settings" disabled={disabled || !settings || configured.config_error} onClick={() => setGlobalEditor(true)}>{r("globalAcpSettings")}</button><button type="button" className="secondary-button" aria-label="Add Coding Agent" disabled={disabled || !settings || configured.config_error} onClick={() => settings && setEditor({ profile: null, revision: configured.revision, target: settings.target })}>{r("addCodingAgent")}</button><button type="button" className="secondary-button" aria-label="Refresh Coding Agents" disabled={disabled || loading} onClick={refresh}>{p("refresh")}</button></div>
+    <div className="extension-toolbar"><button type="button" className="primary-button" aria-label="Add Coding Agent" disabled={disabled || !settings || configured.config_error} onClick={() => settings && setEditor({ profile: null, revision: configured.revision, target: settings.target })}>{r("addCodingAgent")}</button><button type="button" className="secondary-button" aria-label="Refresh Coding Agents" disabled={disabled || loading} onClick={refresh}>{p("refresh")}</button></div>
     <p className="workspace-notice">{r("agentHelp")}</p>
-    <p className="workspace-notice">{r("globalPolicySummary")}: <code>{String(configured.global_settings?.forced_config?.model ?? "gpt-6-luna")}</code> · <code>{String(configured.global_settings?.forced_config?.reasoning_effort ?? "max")}</code></p>
     <RunnerCapabilityAuthorization settings={settings} capability="coding_agents" disabled={disabled} refreshKey={revision} onAuthorized={refresh} />
     {configured.restart_required && <div className="extension-apply-bar" role="status"><span>{r("savedRestart")}</span><button type="button" className="secondary-button" aria-label="Restart Runner" disabled={disabled || !settings?.can_restart} onClick={() => void restart()}>{p("restartRunner")}</button></div>}
     {configured.config_error && <p role="alert" className="workspace-notice">{c("configError")}</p>}
@@ -68,7 +65,6 @@ export function CodingAgentsPanel({ state, onState, settings, onRestarted }: {
     {advertised.filter(provider => !configured.profiles.some(profile => profile.provider_id === provider.provider_id)).map(provider => <article className="extension-row" key={provider.provider_id}><div><h3>{provider.name}</h3><code>{provider.provider_id}</code><p>{r("observed")} · {r("active")} · {r("readOnly")}</p></div></article>)}
     {!configured.profiles.length && !advertised.length && !configured.config_error && <p className="workspace-empty">{r("noCodingAgents")}</p>}
     {editor && <CodingAgentEditor profile={editor.profile} revision={editor.revision} target={editor.target} globals={configured.global_settings} onState={onState} onClose={() => setEditor(null)} />}
-    {globalEditor && settings && <CodingAgentGlobalSettingsEditor settings={configured.global_settings} revision={configured.revision} target={settings.target} onState={onState} onClose={() => setGlobalEditor(false)} />}
     {deleting && <WorkspaceDialog title={`${c("remove")} ${deleting.profile.name}`} onClose={() => setDeleting(null)} busy={busy}><p>{r("removeAgentHelp")}</p><div className="connection-actions"><button type="button" className="primary-button" aria-label={`Confirm Remove ${deleting.profile.name}`} disabled={disabled} onClick={() => void remove()}>{c("remove")}</button><button type="button" className="secondary-button" disabled={disabled} onClick={() => setDeleting(null)}>{p("cancel")}</button></div></WorkspaceDialog>}
   </div>;
 }

@@ -559,6 +559,57 @@ fn cargo_test_lib_false_canonicalizes_to_omission_and_true_is_preserved() {
 }
 
 #[test]
+fn cargo_check_package_selectors_canonicalize_to_one_internal_shape() {
+    let single = ToolCall::from_tool_name(
+        "cargo_check",
+        json!({"project": "demo", "package": " package-b "}),
+    )
+    .unwrap();
+    assert!(matches!(
+        single,
+        ToolCall::CargoCheck {
+            package: None,
+            packages: Some(ref packages),
+            ..
+        } if packages == &["package-b"]
+    ));
+
+    let multiple = ToolCall::from_tool_name(
+        "cargo_check",
+        json!({
+            "project": "demo",
+            "packages": ["package-c", " package-a ", "package-c", "package-b"]
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        multiple,
+        ToolCall::CargoCheck {
+            package: None,
+            packages: Some(ref packages),
+            ..
+        } if packages == &["package-a", "package-b", "package-c"]
+    ));
+
+    for invalid in [
+        json!({"project": "demo", "package": "package-a", "packages": ["package-b"]}),
+        json!({"project": "demo", "packages": []}),
+        json!({"project": "demo", "packages": ["   "]}),
+    ] {
+        let error = ToolCall::from_tool_name("cargo_check", invalid)
+            .expect_err("invalid package selector must fail closed");
+        assert!(error.contains("package"), "{error}");
+    }
+
+    let error = ToolCall::from_tool_name("cargo_check", json!({"project": "demo", "packages": []}))
+        .expect_err("empty package selection must fail closed");
+    assert_eq!(
+        error,
+        "invalid arguments for tool 'cargo_check': packages must contain between 1 and 32 items"
+    );
+}
+
+#[test]
 fn tool_manifest_default_flows_follow_discovery_shape() {
     for arguments in [
         json!({"tool_name": "cargo_test"}),
@@ -1022,6 +1073,23 @@ fn tool_call_project_accessor_covers_project_tool_specs() {
     )
     .unwrap();
     assert_eq!(handoff.project(), Some("agent:oe:private-drop"));
+
+    // Adapter-only handoff state keeps its exact business target but never
+    // exposes that Session through the generic recorder projection.
+    let handoff_state = ToolCall::from_tool_name(
+        "session_handoff_state",
+        json!({"session_id": "wc_sess_x", "project": "agent:oe:private-drop"}),
+    )
+    .unwrap();
+    assert_eq!(handoff_state.project(), Some("agent:oe:private-drop"));
+    assert_eq!(handoff_state.session_id(), None);
+    assert!(is_model_hidden_tool_name("session_handoff_state"));
+    assert!(runtime_tool_requires_explicit_business_session(
+        "session_handoff_state"
+    ));
+    let activity = runtime_tool_activity_semantics("session_handoff_state");
+    assert_eq!(activity.presentation.as_str(), "support");
+    assert!(!activity.interaction.is_meaningful());
 }
 
 #[test]
@@ -1984,5 +2052,70 @@ fn guidance_profile_code_mode_fails_closed_when_feature_is_unavailable() {
     assert!(
         error.contains("code_mode") && error.contains("direct"),
         "{error}"
+    );
+}
+
+#[test]
+fn external_observation_contract_uses_explicit_identities_and_no_raw_payload() {
+    let mut value = json!({"project":"agent:r:p", "session_id":format!("wc_sess_{}","1".repeat(32)),
+        "adapter_id":"a".repeat(64),"event_id":"b".repeat(64),"observed_tool":"Bash"});
+    let call = ToolCall::from_tool_name("record_external_observation", value.clone()).unwrap();
+    assert_eq!(call.project(), Some("agent:r:p"));
+    assert_eq!(call.session_id(), None);
+    assert!(matches!(
+        call,
+        ToolCall::RecordExternalObservation {
+            exit_code: None,
+            ..
+        }
+    ));
+    value["command"] = json!("must not be accepted");
+    assert!(ToolCall::from_tool_name("record_external_observation", value).is_err());
+    assert!(!crate::is_model_visible_tool_name(
+        "record_external_observation"
+    ));
+    assert!(crate::is_model_visible_tool_name(
+        "list_external_observations"
+    ));
+    assert!(registered_tool_specs()
+        .into_iter()
+        .all(|spec| spec.name != "record_external_observation"));
+
+    for name in ["record_external_observation", "list_external_observations"] {
+        let activity = crate::runtime_tool_activity_semantics(name);
+        assert_eq!(activity.presentation.as_str(), "support");
+        assert!(!activity.interaction.is_meaningful());
+    }
+
+    let list_spec = registered_tool_specs()
+        .into_iter()
+        .find(|spec| spec.name == "list_external_observations")
+        .unwrap();
+    for field in ["session_id", "project"] {
+        assert!(list_spec.input_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(field)));
+    }
+
+    let record_schema = crate::registry::output_schema_for_tool("record_external_observation");
+    let record_output = &record_schema["properties"]["output"]["properties"];
+    let observation = &record_output["observation"];
+    assert_eq!(observation["additionalProperties"], false);
+    assert_eq!(
+        observation["properties"]["status"]["enum"],
+        json!(["unknown", "reported_success", "reported_failure"])
+    );
+
+    let list_output = &list_spec.output_schema["properties"]["output"]["properties"];
+    let observations = &list_output["observations"];
+    assert_eq!(observations["maxItems"], 256);
+    assert_eq!(observations["items"]["additionalProperties"], false);
+    let coverage = &list_output["coverage"];
+    assert_eq!(coverage["additionalProperties"], false);
+    assert_eq!(coverage["properties"]["complete"]["const"], false);
+    assert_eq!(
+        coverage["properties"]["reason"]["enum"],
+        json!(["source_sequence_unavailable"])
     );
 }

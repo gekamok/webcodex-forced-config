@@ -11,14 +11,14 @@ import { CodingAgentsPanel } from "./extensions/CodingAgentsPanel";
 import { SshResourcesPanel } from "./extensions/SshResourcesPanel";
 import { RunnerCapabilityAuthorization } from "./extensions/RunnerCapabilityAuthorization";
 
-const api = vi.hoisted(() => ({ saveCodingAgent: vi.fn(), saveCodingAgentGlobals: vi.fn(), removeCodingAgent: vi.fn(), runnerSettings: vi.fn(), restartOwnedRunner: vi.fn(), sshResources: vi.fn(), registerSshResource: vi.fn(), removeSshResource: vi.fn(), authorizeRunnerCapabilities: vi.fn(), runnerCapabilityAuthorization: vi.fn() }));
+const api = vi.hoisted(() => ({ saveCodingAgent: vi.fn(), removeCodingAgent: vi.fn(), runnerSettings: vi.fn(), restartOwnedRunner: vi.fn(), sshResources: vi.fn(), registerSshResource: vi.fn(), removeSshResource: vi.fn(), authorizeRunnerCapabilities: vi.fn(), runnerCapabilityAuthorization: vi.fn() }));
 const query = vi.hoisted(() => vi.fn());
 vi.mock("../lib/desktop-api", () => ({ desktopApi: api }));
 vi.mock("./workspace/WorkspaceContext", () => ({ workspaceQuery: query }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 const target = { config_path: "/fixture/runner.toml", client_id: "fixture", server_url: "http://127.0.0.1:62645" };
 const settings: RunnerSettings = { target, paths: { instruction_files: [], skill_roots: [] }, plugin_ids: [], can_restart: true };
-const profile: CodingAgentProfile = { provider_id: "pi", name: "Pi Agent", executable: "/fixture/pi-acp", args: ["--acp"], enabled: true, env_from_env: {}, allowed_config_options: [], forced_config: {} };
+const profile: CodingAgentProfile = { provider_id: "pi", name: "Pi Agent", executable: "/fixture/pi-acp", args: ["--acp"], enabled: true, env_from_env: {}, allowed_config_options: [] };
 function state(): DesktopState {
   return {
     topology: { experience: "full", server: { kind: "local" }, runner: { kind: "local" }, exposure: { kind: "none" }, enrollment: { kind: "managed_pairing" } },
@@ -84,25 +84,6 @@ describe("Desktop Coding Agents", () => {
     await waitFor(() => expect(api.restartOwnedRunner).toHaveBeenCalledExactlyOnceWith(target));
     await waitFor(() => expect(within(screen.getByRole("article", { name: "Pi Agent" })).getByText("Configured · Active")).toBeInTheDocument());
     expect(query).toHaveBeenLastCalledWith({ kind: "overview" });
-  });
-
-  it("saves GPT-6 Luna max as Runner-global ACP policy", async () => {
-    const saved = state();
-    saved.coding_agents = { ...EMPTY_CODING_AGENTS, revision: 1, global_settings: { max_concurrent_runs: 1, permission_timeout_secs: 5, forced_config: { model: "gpt-6-luna", reasoning_effort: "max" } }, restart_required: true };
-    api.saveCodingAgentGlobals.mockResolvedValue(saved);
-    render(<Harness />);
-    fireEvent.click(screen.getByRole("button", { name: "Global ACP Settings" }));
-    const dialog = screen.getByRole("dialog", { name: "Global ACP Settings" });
-    expect(within(dialog).getByLabelText("Global forced model")).toHaveValue("gpt-6-luna");
-    expect(within(dialog).getByLabelText("Global forced reasoning effort")).toHaveValue("max");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Global ACP Settings" }));
-    await waitFor(() => expect(api.saveCodingAgentGlobals).toHaveBeenCalledWith(expect.objectContaining({
-      target,
-      expected_revision: 0,
-      global_settings: expect.objectContaining({
-        forced_config: { model: "gpt-6-luna", reasoning_effort: "max" },
-      }),
-    })));
   });
 
   it("never invents Active from desired state, another Runner or a stale provider name", async () => {
