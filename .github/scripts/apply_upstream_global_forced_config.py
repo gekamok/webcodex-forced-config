@@ -587,7 +587,7 @@ write(p, text)
 text = read(p)
 text = text.replace(
 "config_values={'one':'a','two':'a','three':'a','four':'a'}",
-"config_values={'one':'a','two':'a','three':'a','four':'a','mode':'agent','model':'default-model','reasoning_effort':'medium'}",
+"config_values={'one':'a','two':'a','three':'a','four':'a','mode':'agent','model':'default-model','reasoning_effort':'medium','feature_flag':False}",
 1,
 )
 old = """ elif method=='session/new':
@@ -602,7 +602,9 @@ new = """ elif method=='session/new':
    opts=[
     {'id':'mode','name':'Mode','type':'select','currentValue':config_values['mode'],'options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]},
     {'id':'model','name':'Model','type':'select','currentValue':config_values['model'],'options':[{'value':'default-model','name':'Default'},{'value':'policy-model','name':'Policy'}]},
-    {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'high','name':'High'}]}
+    {'id':'reasoning_effort','name':'Reasoning Effort','type':'select','currentValue':config_values['reasoning_effort'],'options':[{'value':'medium','name':'Medium'},{'value':'high','name':'High'}]},
+    {'id':'feature_flag','name':'Feature Flag','type':'boolean','currentValue':config_values['feature_flag']},
+    {'id':'feature_flag','name':'Feature Flag','type':'boolean','currentValue':config_values['feature_flag']}
    ]
   else:
    opts=[{'id':'mode','name':'Mode','type':'select','currentValue':'agent','options':[{'value':'agent','name':'Agent'},{'value':'read-only','name':'Read Only'}]}"""
@@ -709,6 +711,91 @@ write(p, text)
 # Insert focused runtime policy tests before the next setup-deadline test family.
 text = read(p)
 marker = '''    #[test]
+    #[cfg(unix)]
+    fn forced_boolean_config_is_applied_before_prompt() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_configs");
+        let mut cfg = fake_config(exe, args);
+        cfg.forced_config.insert(
+            "feature_flag".to_string(),
+            CodingAgentConfigValue::Bool(true),
+        );
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_forcedbool0001";
+        assert!(manager
+            .handle(
+                start_request(&manager, &root, run, BTreeMap::new()),
+                &projects,
+            )
+            .error
+            .is_none());
+        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+        assert_eq!(terminal.state, CodingAgentRunState::Completed);
+        assert_eq!(
+            received_config_ids(&wire_log(&temp)),
+            vec!["feature_flag".to_string()]
+        );
+        let log = wire_log(&temp);
+        let set = log
+            .iter()
+            .filter_map(|entry| entry.get("recv"))
+            .find(|recv| {
+                recv.get("method").and_then(Value::as_str) == Some("session/set_config_option")
+            })
+            .unwrap();
+        assert_eq!(
+            set.pointer("/params/type").and_then(Value::as_str),
+            Some("boolean")
+        );
+        assert_eq!(
+            set.pointer("/params/value").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn illegal_forced_select_value_fails_without_prompt() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "forced_configs");
+        let mut cfg = fake_config(exe, args);
+        cfg.forced_config.insert(
+            "model".to_string(),
+            CodingAgentConfigValue::String("not-advertised-model".to_string()),
+        );
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_forcedinvalid01";
+        assert!(manager
+            .handle(
+                start_request(&manager, &root, run, BTreeMap::new()),
+                &projects,
+            )
+            .error
+            .is_none());
+        let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+        assert_eq!(terminal.state, CodingAgentRunState::Failed);
+        assert_eq!(
+            terminal
+                .terminal
+                .as_ref()
+                .and_then(|terminal| terminal.error_code.as_deref()),
+            Some("coding_agent_forced_config_invalid")
+        );
+        assert!(received_config_ids(&wire_log(&temp)).is_empty());
+        assert_eq!(
+            received_methods(&wire_log(&temp))
+                .iter()
+                .filter(|method| method.as_str() == "session/prompt")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn config_setup_cumulatively_consumes_total_run_deadline() {'''
 tests = r'''    #[test]
@@ -1040,6 +1127,18 @@ write(p, text)
 # ---------------------------------------------------------------------------
 p = "docs/agent/acp-coding-agent-run.md"
 text = read(p)
+text = text.replace(
+    '### `config` omitted or `{}` means no WebCodex override',
+    '### `config` omitted or `{}` means no caller run-level override',
+)
+text = text.replace(
+    'means **send no `session/set_config_option` calls**.',
+    'means **send no caller-requested `session/set_config_option` calls**. If the Runner has a non-empty `[acp.forced_config]` policy, the Runner may still send `session/set_config_option` calls to enforce that operator-owned policy before prompt dispatch.',
+)
+text = text.replace(
+    '> WebCodex inherits the selected Runner-owned ACP provider\'s effective defaults\n> by abstaining from run-level ACP config overrides.',
+    '> Without Runner-global forced policy, WebCodex inherits the selected Runner-owned ACP provider\'s effective defaults by abstaining from caller run-level ACP config overrides. A configured global forced policy is operator-owned policy and is enforced separately.',
+)
 append = r'''
 
 ## Runner-global forced ACP configuration
@@ -1077,6 +1176,18 @@ startup/restart-owned; forced-policy changes do not hot-reload.
 if "## Runner-global forced ACP configuration" not in text:
     text += append
 write(p, text)
+
+# Keep the public tool contract precise: omitted caller config does not disable
+# Runner-owned forced policy.
+p = "crates/webcodex-tool-contracts/src/tool_call.rs"
+rep(
+    p,
+'''        /// Optional explicit run-level ACP config overrides. Omission or {} sends zero set_config_option
+        /// calls. Every key/value must be live-advertised and operator-allowed before prompt dispatch.''',
+'''        /// Optional explicit run-level ACP config overrides. Omission or {} sends no caller-requested
+        /// set_config_option calls; Runner-owned forced_config policy may still apply its own values.
+        /// Every caller key/value must be live-advertised and operator-allowed before prompt dispatch.''',
+)
 
 p = "deploy/webcodex-runner.toml.example"
 text = read(p)
