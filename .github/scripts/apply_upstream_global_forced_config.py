@@ -113,7 +113,7 @@ rep(
 
 rep(
     p,
-'''        for option in &agent.allowed_config_options {
+r'''        for option in &agent.allowed_config_options {
             if option.is_empty()
                 || option.len() > CODING_AGENT_MAX_CONFIG_KEY_BYTES
                 || option.contains(['\0', '\r', '\n'])
@@ -127,7 +127,7 @@ rep(
         }
     }
     Ok(())''',
-'''        for option in &agent.allowed_config_options {
+r'''        for option in &agent.allowed_config_options {
             if option.is_empty()
                 || option.len() > CODING_AGENT_MAX_CONFIG_KEY_BYTES
                 || option.contains(['\0', '\r', '\n'])
