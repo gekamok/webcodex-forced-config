@@ -1,0 +1,131 @@
+name: Build global ACP upstream test release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-global-acp-upstream-release.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x64 upstream-policy test
+    runs-on: windows-latest
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.runtime.outputs.version }}
+      short: ${{ steps.runtime.outputs.short }}
+      source: ${{ steps.runtime.outputs.source }}
+    steps:
+      - name: Checkout tested feature commit
+        uses: actions/checkout@v4
+        with:
+          ref: bc82895aaa86106823d2db8565dfa1759ae7deff
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: upstream-global-acp-test-windows
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            apps/desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        run: |
+          npm ci --prefix frontend
+          npm ci --prefix apps/desktop
+
+      - name: Build exact WebCodex Runtime
+        id: runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = (git rev-parse HEAD).Trim()
+          if ($source -ne "bc82895aaa86106823d2db8565dfa1759ae7deff") { throw "Unexpected source $source" }
+          $short = (git rev-parse --short=12 HEAD).Trim()
+          $version = (node -e "console.log(require('./npm/webcodex/package.json').version)").Trim()
+          $builtAt = [Int64]((git show -s --format=%ct HEAD).Trim())
+          $env:WEBCODEX_BUILT_AT = "$builtAt"
+          cargo build --locked --profile dogfood -p webcodex -p webcodex-cli -p webcodex-runner
+          if ($LASTEXITCODE -ne 0) { throw "Runtime build failed" }
+          "source=$source" >> $env:GITHUB_OUTPUT
+          "short=$short" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "built_at=$builtAt" >> $env:GITHUB_OUTPUT
+
+      - name: Stage runtime for Desktop
+        id: bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = Join-Path $env:RUNNER_TEMP "webcodex-upstream-global-acp-test"
+          & .\scripts\prepare_desktop_bundle.ps1 -BinDir "target\dogfood" -Version "${{ steps.runtime.outputs.version }}" -SourceSha "${{ steps.runtime.outputs.source }}" -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") -OutputDir $stage
+          "config=$(Join-Path $stage 'tauri.bundle.conf.json')" >> $env:GITHUB_OUTPUT
+
+      - name: Build Windows NSIS installer
+        id: installer
+        working-directory: apps/desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE "target\desktop-upstream-global-acp"
+          npm exec tauri -- build --bundles nsis --config "${{ steps.bundle.outputs.config }}" --ci --no-sign -- --locked
+          if ($LASTEXITCODE -ne 0) { throw "Tauri NSIS build failed" }
+          $bundleDir = Join-Path $env:CARGO_TARGET_DIR "release\bundle\nsis"
+          $built = @(Get-ChildItem -LiteralPath $bundleDir -Filter "*-setup.exe" -File)
+          if ($built.Count -ne 1) { throw "Expected exactly one installer, found $($built.Count)" }
+          $dist = Join-Path $env:GITHUB_WORKSPACE "target\desktop-dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $name = "webcodex-desktop-${{ steps.runtime.outputs.short }}-v${{ steps.runtime.outputs.version }}-upstream-global-acp-test-win32-x64-setup.exe"
+          $installer = Join-Path $dist $name
+          Copy-Item -LiteralPath $built[0].FullName -Destination $installer
+          "path=$installer" >> $env:GITHUB_OUTPUT
+
+      - name: Smoke Windows installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\scripts\desktop_install_windows_smoke.ps1 -Installer "${{ steps.installer.outputs.path }}" -Version "${{ steps.runtime.outputs.version }}" -SourceSha "${{ steps.runtime.outputs.source }}" -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") -Platform win32-x64
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-global-acp-test-win32-x64
+          path: ${{ steps.installer.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish upstream-policy test prerelease
+    needs: windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download installer
+        uses: actions/download-artifact@v4
+        with:
+          name: upstream-global-acp-test-win32-x64
+          path: release-assets
+
+      - name: Publish prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v${{ needs.windows.outputs.version }}-global-acp-test.${{ needs.windows.outputs.short }}"
+          title="Global ACP forced_config upstream test ${{ needs.windows.outputs.short }}"
+          notes="Test build from latest yyjeqhc/webcodex upstream base 85e3faa30a8f15f9c3a12d46697f77585d8dd6b0 plus one clean generic Runner-global forced_config commit bc82895aaa86106823d2db8565dfa1759ae7deff. Intended for local validation before opening the upstream PR for issue #635."
+          gh release create "$tag" release-assets/*.exe --repo "$GITHUB_REPOSITORY" --target "bc82895aaa86106823d2db8565dfa1759ae7deff" --title "$title" --notes "$notes" --prerelease
